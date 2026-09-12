@@ -1,0 +1,26 @@
+# Railway deployment.
+#
+# ONE always-on service with a mounted volume. Not a cron job: a collection
+# pass takes 15-40 minutes under Apple's rate limit, and Railway skips a cron
+# run whose predecessor is still alive.
+#
+# A volume is REQUIRED. Railway's filesystem is ephemeral, so without one the
+# database is wiped on every deploy and restart — and snapshot history is the
+# one thing that cannot be rebuilt afterwards.
+#
+#   Volume mount path : /data
+#   SQLITE_PATH       : /data/aso_scout.db
+#
+# BEFORE TRUSTING ANY DATA, run once in the Railway shell:
+#   python -m src.jobs.doctor
+# Railway egress IPs are shared and may already be rate-limited by Apple.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python -m src.jobs.worker"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

@@ -1,0 +1,5 @@
+httpx>=0.27
+rapidfuzz>=3.9
+inflect>=7.3
+# Postgres on Railway; SQLite locally needs nothing extra.
+# psycopg not needed: SQLite on a Railway volume is simpler and enough here.
