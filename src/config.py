@@ -161,10 +161,40 @@ class Thresholds:
     review_to_install_multiplier: int = 45
 
 
+def _default_sqlite_path() -> str:
+    """
+    Where the database lives.
+
+    Explicit SQLITE_PATH wins. Otherwise, if Railway has mounted a volume it
+    sets RAILWAY_VOLUME_MOUNT_PATH automatically, and we put the database
+    there. This matters because the failure it prevents is silent: without a
+    volume the database lands on the ephemeral filesystem, gets wiped on every
+    deploy, and nothing in the logs says so — you would just keep seeing
+    "истории накоплено 0 нед." forever.
+    """
+    explicit = os.environ.get("SQLITE_PATH")
+    if explicit:
+        return explicit
+    mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount:
+        return os.path.join(mount, "aso_scout.db")
+    return "aso_scout.db"
+
+
+def on_railway() -> bool:
+    return bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME")
+                or os.environ.get("RAILWAY_SERVICE_ID")
+                or os.environ.get("RAILWAY_PROJECT_ID"))
+
+
+def volume_mounted() -> bool:
+    return bool(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"))
+
+
 @dataclass
 class Settings:
     db_url: str = field(default_factory=lambda: os.environ.get("DATABASE_URL", ""))
-    sqlite_path: str = field(default_factory=lambda: os.environ.get("SQLITE_PATH", "aso_scout.db"))
+    sqlite_path: str = field(default_factory=_default_sqlite_path)
 
     # Apple rate limiting. ~20 req/min per IP is the observed ceiling on the
     # iTunes endpoints. Staying under it is cheaper than getting the IP burned.

@@ -11,10 +11,11 @@ after a week of collection.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 from .. import db
-from ..config import settings
+from ..config import on_railway, settings, volume_mounted
 from ..sources import itunes, suggest
 from ..sources.http import AppleClient
 
@@ -27,7 +28,16 @@ async def main() -> int:
     print("ASO Scout preflight\n" + "=" * 46)
     problems = 0
 
-    print(f"\nstorage: {'Postgres' if settings.use_postgres else 'SQLite ' + settings.sqlite_path}")
+    print(f"\nstorage: SQLite {settings.sqlite_path}")
+    if on_railway() and not volume_mounted():
+        print(f"  [{BAD}] running on Railway with NO volume mounted.")
+        print("         The database is on the ephemeral filesystem and will be")
+        print("         wiped on every deploy and restart. Snapshot history is")
+        print("         the one thing that cannot be rebuilt — attach a volume")
+        print("         before collecting anything.")
+        problems += 1
+    elif volume_mounted():
+        print(f"  [{OK}] volume mounted at {os.environ['RAILWAY_VOLUME_MOUNT_PATH']}")
     try:
         db.init_db()
         with db.connect() as conn:
