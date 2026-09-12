@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -160,6 +161,67 @@ def today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def preflight_path(path: str) -> None:
+    """
+    Validate the database location before SQLite gets a chance to fail.
+
+    sqlite3 reports a missing parent directory as "unable to open database
+    file", which names neither the path nor the reason. On Railway that sent a
+    deploy into a 28-restart loop with nothing actionable in the logs.
+
+    The directory is created when it is safe to do so. It is NOT created blind
+    on Railway: if the volume is missing, creating /data on the ephemeral
+    filesystem would make everything appear to work while the database is
+    wiped on every deploy — a silent failure that costs weeks of history.
+    """
+    from .config import on_railway, volume_mounted  # noqa: PLC0415
+
+    parent = os.path.dirname(os.path.abspath(path))
+
+    if on_railway() and not volume_mounted():
+        raise SystemExit(
+            f"\nRefusing to start: no Railway volume is mounted.\n"
+            f"  database path : {path}\n"
+            f"  volume        : not mounted (RAILWAY_VOLUME_MOUNT_PATH unset)\n\n"
+            f"Without a volume the database lives on the ephemeral filesystem\n"
+            f"and is wiped on every deploy and restart. Snapshot history is the\n"
+            f"one thing that cannot be rebuilt afterwards.\n\n"
+            f"Create a volume with the Command Palette (Cmd+K) or by right-\n"
+            f"clicking the project canvas, and mount it at /data. The database\n"
+            f"path then follows RAILWAY_VOLUME_MOUNT_PATH automatically — you\n"
+            f"do not need to set SQLITE_PATH by hand.\n"
+        )
+
+    mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount and not os.path.abspath(path).startswith(os.path.abspath(mount)):
+        raise SystemExit(
+            f"\nRefusing to start: the database is outside the mounted volume.\n"
+            f"  database path : {path}\n"
+            f"  volume        : {mount}\n\n"
+            f"Anything outside the volume is wiped on deploy. Either unset\n"
+            f"SQLITE_PATH so it defaults into the volume, or point it at a\n"
+            f"path under {mount}.\n"
+        )
+
+    if not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            log.info("created database directory %s", parent)
+        except OSError as exc:
+            raise SystemExit(
+                f"\nCannot create the database directory.\n"
+                f"  database path : {path}\n"
+                f"  directory     : {parent}\n"
+                f"  error         : {exc}\n"
+            ) from exc
+
+    if not os.access(parent, os.W_OK):
+        raise SystemExit(
+            f"\nDatabase directory is not writable.\n"
+            f"  directory : {parent}\n"
+        )
+
+
 @contextmanager
 def connect(path: str | None = None) -> Iterator[sqlite3.Connection]:
     """
@@ -185,6 +247,7 @@ def connect(path: str | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(path: str | None = None) -> None:
+    preflight_path(path or settings.sqlite_path)
     with connect(path) as conn:
         conn.executescript(SCHEMA)
     log.info("schema ready at %s", path or settings.sqlite_path)

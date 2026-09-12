@@ -123,6 +123,13 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
     )
+    # Credentials first. Starting the scheduler and opening the database
+    # before discovering that the server cannot bind wastes a restart cycle
+    # and buries the real cause under unrelated log lines.
+    from ..server import _credentials  # noqa: PLC0415
+
+    _credentials()
+
     db.init_db()
     ensure_state_table()
 
