@@ -32,7 +32,7 @@ from .collect import run
 
 log = logging.getLogger(__name__)
 
-STATE_LAST_RUN = "last_collect_date"
+STATE_LAST_RUN = "last_collect_slot"
 
 
 def _get_state(conn, key: str) -> str | None:
@@ -71,7 +71,7 @@ async def collect_once() -> None:
                 roots, reason = pick_roots(conn, store.key, roots_per_run)
 
             if not roots:
-                log.warning("%s: no roots to probe", store.key)
+                log.info("%s: nothing to probe (%s)", store.key, reason)
                 continue
 
             log.info("%s: probing %s (%s)", store.key, roots, reason)
@@ -87,30 +87,62 @@ async def collect_once() -> None:
             )
 
 
+def collect_hours() -> list[int]:
+    """
+    UTC hours at which to collect.
+
+    COLLECT_HOURS takes a comma-separated list ("3,11,19"). COLLECT_HOUR is
+    still honoured for a single hour so existing deployments keep working.
+
+    More runs per day widen keyword coverage. They do NOT speed up review
+    deltas: app_metrics_daily is keyed by (app, calendar day), so extra runs
+    overwrite the same row. Alerts still need weeks of calendar history.
+    """
+    raw = os.environ.get("COLLECT_HOURS") or os.environ.get("COLLECT_HOUR", "3")
+    hours: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h = int(part)
+        except ValueError:
+            log.warning("ignoring bad hour %r in COLLECT_HOURS", part)
+            continue
+        if 0 <= h <= 23:
+            hours.append(h)
+        else:
+            log.warning("ignoring out-of-range hour %d", h)
+    return sorted(set(hours)) or [3]
+
+
 def scheduler_loop() -> None:
-    hour = int(os.environ.get("COLLECT_HOUR", 3))
-    log.info("scheduler armed for %02d:00 UTC daily", hour)
+    hours = collect_hours()
+    log.info("scheduler armed for %s UTC daily",
+             ", ".join(f"{h:02d}:00" for h in hours))
 
     while True:
         try:
             now = datetime.now(timezone.utc)
-            today = now.date().isoformat()
+            # The slot is date+hour, not date: keyed on the date alone, the
+            # second and third run of the day would be skipped as duplicates.
+            slot = f"{now.date().isoformat()}T{now.hour:02d}"
 
             ensure_state_table()
             with db.connect() as conn:
                 last = _get_state(conn, STATE_LAST_RUN)
 
-            if now.hour == hour and last != today:
-                log.info("starting daily collection for %s", today)
+            if now.hour in hours and last != slot:
+                log.info("starting collection for slot %s", slot)
                 # Claim the slot before running: a crash mid-run must not put
                 # the worker into a restart loop that re-probes all day.
                 with db.connect() as conn:
-                    _set_state(conn, STATE_LAST_RUN, today)
+                    _set_state(conn, STATE_LAST_RUN, slot)
                 try:
                     asyncio.run(collect_once())
-                    log.info("daily collection finished")
+                    log.info("collection finished")
                 except Exception:
-                    log.exception("collection failed; will retry tomorrow")
+                    log.exception("collection failed; will retry next slot")
 
             time.sleep(60)
         except Exception:

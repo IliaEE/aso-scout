@@ -16,13 +16,18 @@ extra state to keep in sync.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 from ..seeds.expand import STOPWORDS, next_probes, singularize
 from ..seeds.verbs import SEED_VERBS, TOO_BROAD
 
 log = logging.getLogger(__name__)
+
+# A probed prefix is not worth revisiting sooner than this.
+REPROBE_AFTER_DAYS = int(os.environ.get("REPROBE_AFTER_DAYS", 7))
 
 
 def probed(conn: sqlite3.Connection, storefront: str) -> set[str]:
@@ -61,15 +66,29 @@ def discovered_verbs(conn: sqlite3.Connection, min_evidence: int = 2) -> list[st
 
 
 def stalest_prefixes(
-    conn: sqlite3.Connection, storefront: str, limit: int
+    conn: sqlite3.Connection,
+    storefront: str,
+    limit: int,
+    min_age_days: int | None = None,
 ) -> list[str]:
-    """Oldest probes first — keeps the corpus fresh once the frontier is spent."""
+    """
+    Oldest probes first — keeps the corpus fresh once the frontier is spent.
+
+    `min_age_days` matters once collection runs several times a day: without
+    it, a spent frontier means the same prefixes get re-probed every few
+    hours, burning the rate limit on suggestions that barely change. Apple's
+    hints move on a scale of weeks, not hours.
+    """
+    days = min_age_days if min_age_days is not None else REPROBE_AFTER_DAYS
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
     return [
         r["prefix"]
         for r in conn.execute(
             "SELECT prefix FROM probed_prefixes WHERE storefront = ? "
-            "ORDER BY probed_at ASC LIMIT ?",
-            (storefront, limit),
+            "AND probed_at < ? ORDER BY probed_at ASC LIMIT ?",
+            (storefront, cutoff, limit),
         )
     ]
 
@@ -109,6 +128,14 @@ def pick_roots(conn: sqlite3.Connection, storefront: str, n: int) -> tuple[list[
                  if p not in picked]
         picked += stale[:remaining]
         if not fresh_seeds:
+            if not stale:
+                # Everything is fresh and the frontier is empty. Doing nothing
+                # is correct: re-probing unchanged prefixes would spend the
+                # rate limit to learn nothing.
+                return picked, (
+                    f"фронтир исчерпан, все префиксы свежее "
+                    f"{REPROBE_AFTER_DAYS} дн. — пропускаем прогон"
+                )
             return picked, "фронтир исчерпан — обновляем самые старые префиксы"
 
     picked = [p for p in picked if p not in TOO_BROAD]
