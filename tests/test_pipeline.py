@@ -344,6 +344,41 @@ check(not _giant_cluster,
       f"{[(c.head, c.members) for c in _cl3]}")
 
 
+print("\n--- tracked-app refresh keeps deltas alive ---")
+# Root rotation only moves forward, so an app snapshotted today is never seen
+# again once its root is spent. Without a refresh step every app would sit at
+# one reading and find_alerts (which needs 3 in 30 days) could never fire.
+import tempfile as _tf
+from pathlib import Path as _P
+from src import db as _db
+from src.report.render import find_alerts as _alerts
+
+_tmp = _P(_tf.mkdtemp()) / "alerts.db"
+_db.init_db(str(_tmp))
+with _db.connect(str(_tmp)) as _c:
+    _c.execute("INSERT INTO apps VALUES (1,'us','Decibel X','Utilities','{}','2026-09-13')")
+    for _d, _rt in [("2026-08-25", 4.7), ("2026-09-01", 4.5),
+                    ("2026-09-08", 4.3), ("2026-09-13", 4.1)]:
+        _c.execute("INSERT OR REPLACE INTO app_metrics_daily VALUES (1,'us',?,?,90000)",
+                   (_d, _rt))
+    _fired = _alerts(_c)
+    check(len(_fired) == 1 and "Decibel X" in _fired[0],
+          f"decaying leader raises an alert: {_fired}")
+
+    _c.execute("INSERT INTO apps VALUES (2,'us','Stable','Utilities','{}','2026-09-13')")
+    for _d, _rt in [("2026-08-25", 4.6), ("2026-09-01", 4.6),
+                    ("2026-09-08", 4.55), ("2026-09-13", 4.5)]:
+        _c.execute("INSERT OR REPLACE INTO app_metrics_daily VALUES (2,'us',?,?,10000)",
+                   (_d, _rt))
+    check(not [a for a in _alerts(_c) if "Stable" in a],
+          "a stable leader stays quiet")
+
+    _c.execute("DELETE FROM app_metrics_daily WHERE track_id = 1 "
+               "AND day <> '2026-09-13'")
+    check(not [a for a in _alerts(_c) if "Decibel" in a],
+          "a single reading cannot produce an alert — hence the refresh step")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")

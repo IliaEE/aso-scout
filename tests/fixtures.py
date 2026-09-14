@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from src.sources.http import FixtureClient
-from src.sources.itunes import SEARCH_URL
+from src.sources.itunes import LOOKUP_URL, SEARCH_URL
 from src.sources.suggest import HINTS_URL
 
 
@@ -175,5 +175,25 @@ def build_client() -> FixtureClient:
     f[search_key("scan barcode")] = {"resultCount": 10, "results": NOISE_METER}
     f[search_key("scan to pdf")] = {"resultCount": 10, "results": NOISE_METER}
     f[search_key("scan")] = {"resultCount": 10, "results": NOISE_METER}
+
+    # Lookup responses for the tracked-app refresh. Keyed by the exact id
+    # list the collector will request, so the test exercises real batching.
+    all_apps = NOISE_METER + HABIT_TRACKER + SCAN_PRESSURE + OBSCURE_CONVERTER
+    by_id = {a["trackId"]: a for a in all_apps}
+
+    def lookup_key(ids, country="us"):
+        return FixtureClient.make_key(
+            LOOKUP_URL, {"id": ",".join(str(i) for i in ids), "country": country}
+        )
+
+    # The refresh pulls top-3 of every queued/watchlist keyword; in the
+    # fixture world that resolves to the noise cluster's leaders.
+    for combo in (
+        [1, 2, 3], [2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4, 5],
+    ):
+        f[lookup_key(combo)] = {
+            "resultCount": len(combo),
+            "results": [by_id[i] for i in combo if i in by_id],
+        }
 
     return FixtureClient(f)

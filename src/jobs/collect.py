@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from collections import Counter
 
@@ -62,6 +63,73 @@ async def harvest(
         log.info("probe %-18s -> %d suggestions", root, len(found))
 
     return all_found
+
+
+async def refresh_tracked_apps(client: Fetcher, store: Storefront, conn) -> int:
+    """
+    Re-measure the apps behind every keyword we still care about.
+
+    Without this the alert machinery is dead on arrival. Root rotation only
+    moves forward, so an app snapshotted today is never revisited once its
+    keyword's root is spent — and `find_alerts` needs three readings of the
+    same app inside 30 days to notice a leader decaying. Most apps would sit
+    at one reading forever.
+
+    The lookup endpoint accepts up to 200 ids per call, so several hundred
+    tracked apps cost one or two requests. Running this every pass is
+    effectively free; extra passes on the same calendar day just overwrite
+    the same row, which is harmless.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT sp.raw
+        FROM keywords k
+        JOIN serp_snapshots sp ON sp.id = (
+            SELECT id FROM serp_snapshots
+             WHERE keyword_id = k.id ORDER BY taken_at DESC LIMIT 1
+        )
+        WHERE k.storefront = ? AND k.status IN ('queued', 'watchlist', 'in_astro')
+        """,
+        (store.key,),
+    ).fetchall()
+
+    track_ids: list[int] = []
+    seen: set[int] = set()
+    for r in rows:
+        try:
+            apps = json.loads(r["raw"])
+        except (TypeError, ValueError):
+            continue
+        # Top-3 only. The tail of a SERP churns for reasons that have nothing
+        # to do with the niche, and tracking it would multiply cost for noise.
+        for a in apps[:3]:
+            tid = a.get("track_id")
+            if tid and tid not in seen:
+                seen.add(tid)
+                track_ids.append(tid)
+
+    if not track_ids:
+        return 0
+
+    day = db.today_iso()
+    updated = 0
+    for i in range(0, len(track_ids), 200):
+        batch = track_ids[i:i + 200]
+        apps = await itunes.lookup(client, batch, store.country)
+        for a in apps:
+            if not a.get("track_id"):
+                continue
+            conn.execute(
+                "INSERT INTO app_metrics_daily "
+                "(track_id, storefront, day, rating, rating_count) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(track_id, storefront, day) DO UPDATE SET "
+                "rating = excluded.rating, rating_count = excluded.rating_count",
+                (a["track_id"], store.key, day, a.get("rating"), a.get("rating_count")),
+            )
+            updated += 1
+
+    return updated
 
 
 async def run(
@@ -139,6 +207,11 @@ async def run(
             # about whether the thresholds are sane or the roots were bad.
             for g in s.gates_failed:
                 stats[f"gate_{g}"] += 1
+
+        # Keep the tracked set measured, so deltas and alerts can exist.
+        refreshed = await refresh_tracked_apps(client, store, conn)
+        if refreshed:
+            stats["apps_refreshed"] = refreshed
 
     return dict(stats)
 
