@@ -16,6 +16,7 @@ from typing import Any
 from ..config import settings
 from ..pipeline.cluster import build_clusters, eligible_head
 from .rating import BRAND_SUSPECT, LEGEND, rate
+from . import trends as tr
 
 
 @dataclass
@@ -38,6 +39,17 @@ class ClusterCandidate:
     @property
     def size(self) -> int:
         return 1 + len(self.variants)
+
+    @property
+    def is_broad(self) -> bool:
+        """
+        The head is a single broad word ("split", "crop", "mute").
+
+        These only lead a cluster through the fallback path, when no eligible
+        head exists in the group. The SERP for a bare verb is a grab bag, so
+        the entry is worth showing but not worth trusting.
+        """
+        return not eligible_head(self.head.term)
 
     @property
     def is_brand(self) -> bool:
@@ -338,3 +350,115 @@ def render_text(
               "Звёзды ранжируют внимание, а не предсказывают успех.",
               "Спрос здесь косвенный — точные цифры даёт только Astro."]
     return "\n".join(lines)
+
+
+def render_clusters_table(
+    candidates: list[Candidate],
+    conn=None,
+    limit: int | None = None,
+) -> str:
+    """
+    Every niche as one table row, with the columns a decision actually needs.
+
+    The storefront column is not decoration. Without it the same term from US,
+    GB and CA reads as three duplicate rows with three different scores, which
+    is exactly how the earlier list looked.
+
+    Trend arrows come from stored history and are blank until there is enough
+    of it. `conn` is optional so the table can be rendered without a database.
+    """
+    clusters = group_into_clusters(candidates)
+    niches = [c for c in clusters if not c.is_brand]
+    brands = [c for c in clusters if c.is_brand]
+    niches.sort(key=lambda c: (-c.rating.stars, -c.score))
+    brands.sort(key=lambda c: -c.score)
+
+    markets: dict[str, list[str]] = {}
+    for cl in clusters:
+        markets.setdefault(cl.head.term, []).append(cl.head.storefront.upper())
+
+    days = tr.history_days(conn) if conn is not None else 0
+    stores = sorted({c.storefront.upper() for c in candidates})
+
+    out: list[str] = []
+    out.append(f"НИШИ · {', '.join(stores)} · {len(niches)} из {len(candidates)} запросов")
+    if days < 14:
+        out.append(f"история {days} дн. — тренды появятся примерно через 2 недели")
+    out.append("")
+    out.append(
+        f"{'оценка':<7} {'мкт':<4}{'ниша':<26}{'кл':>3} {'тр':<3}"
+        f"{'лидер':<26}{'рейт':>5}{'отз':>7} {'стар':>5}"
+    )
+    out.append("─" * 96)
+
+    rows = niches[:limit] if limit else niches
+    for cl in rows:
+        c, r = cl.head, cl.rating
+        lead = c.leader or {}
+        feats = c.features
+        reviews = lead.get("rating_count") or 0
+        rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
+        stale = feats.get("stale_share")
+        stale_s = f"{int(stale * 10)}/10" if stale is not None else "·"
+
+        arrow = tr.NONE
+        detail = None
+        if conn is not None:
+            kid = tr.keyword_id_for(conn, c.term, c.storefront)
+            t_demand = tr.demand_trend(conn, c.term, c.storefront)
+            t_traffic = (
+                tr.traffic_trend(conn, lead["track_id"], c.storefront)
+                if lead.get("track_id") else tr.NO_TREND
+            )
+            # Demand first: autocomplete position is closer to what a person
+            # means by "is this getting more popular" than review velocity is.
+            chosen = t_demand if t_demand.known else t_traffic
+            arrow = chosen.arrow
+            detail = chosen.detail
+            if kid:
+                st = tr.score_trend(conn, kid)
+                if st.known and st.arrow != tr.FLAT:
+                    detail = f"{detail + ' · ' if detail else ''}{st.detail}"
+
+        out.append(
+            f"{r.bar:<7} {c.storefront.upper():<4}{c.term[:24]:<26}{cl.size:>3} "
+            f"{arrow:<3}{(lead.get('title') or '?')[:24]:<26}"
+            f"{lead.get('rating') or 0:>4.1f}★{rev:>7} {stale_s:>5}"
+        )
+
+        meta = list(r.flags)
+        if cl.is_broad:
+            meta.append("широкий запрос")
+        also = [m for m in markets.get(c.term, []) if m != c.storefront.upper()]
+        if also:
+            meta.append(f"также в {', '.join(also)}")
+        if detail:
+            meta.append(detail)
+        if meta:
+            out.append(f"{'':12}{' · '.join(meta)}")
+        if cl.variants:
+            more = f" +{len(cl.variants) - 3}" if len(cl.variants) > 3 else ""
+            out.append(f"{'':12}+ {', '.join(v.term for v in cl.variants[:3])}{more}")
+
+    if brands:
+        out.append("")
+        out.append("ЛИДЫ ИЗ БРЕНДОВЫХ ЗАПРОСОВ — спрос доказан, формулировку держит чужое приложение")
+        out.append("─" * 96)
+        for cl in brands[: (limit or 12)]:
+            c = cl.head
+            lead = c.leader or {}
+            reviews = lead.get("rating_count") or 0
+            rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
+            out.append(
+                f"{'':7} {c.storefront.upper():<4}{c.term[:24]:<26}{'':>3} "
+                f"{'':<3}{(lead.get('title') or '?')[:24]:<26}"
+                f"{lead.get('rating') or 0:>4.1f}★{rev:>7}"
+            )
+
+    out.append("")
+    out.append("кл = запросов в кластере · тр = тренд (↑ спрос растёт, ↓ падает,")
+    out.append("→ стабильно, · нет истории) · стар = сколько из топ-10 не")
+    out.append("обновлялись больше года")
+    out.append("")
+    out.append(LEGEND)
+    return "\n".join(out)

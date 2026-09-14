@@ -25,7 +25,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db
 from .report.prompts import build_cluster_prompt
-from .report.render import find_alerts, group_into_clusters, load_queue, render_text
+from .report.render import (
+    find_alerts,
+    group_into_clusters,
+    load_queue,
+    render_clusters_table,
+    render_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -116,18 +122,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _clusters(self) -> str:
         with db.connect() as conn:
-            queue = load_queue(conn)
-            groups = group_into_clusters(queue)
-            out = [f"{len(groups)} ниш из {len(queue)} запросов", ""]
-            for i, cl in enumerate(groups, start=1):
-                lead = (cl.head.leader or {}).get("title", "?")[:44]
-                out.append(f"{i:2}. {cl.head.term}  ·  score {cl.head.score}  ·  "
-                           f"{cl.size} запр.")
-                out.append(f"    топ-1: {lead}")
-                for v in cl.variants:
-                    out.append(f"      · {v.term:<38} {v.score:>5}")
-                out.append("")
-            return "\n".join(out)
+            return render_clusters_table(load_queue(conn), conn)
 
     def _prompt(self, raw: str) -> str:
         from .jobs.report import metadata_tokens, suggestions_for  # noqa: PLC0415

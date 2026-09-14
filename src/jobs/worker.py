@@ -33,6 +33,7 @@ from .collect import run
 log = logging.getLogger(__name__)
 
 STATE_LAST_RUN = "last_collect_slot"
+STATE_LAST_DIGEST = "last_digest_date"
 
 
 def _get_state(conn, key: str) -> str | None:
@@ -116,6 +117,33 @@ def collect_hours() -> list[int]:
     return sorted(set(hours)) or [3]
 
 
+def maybe_send_digest() -> None:
+    """
+    Push the cluster table to Telegram, at most once per calendar day.
+
+    Sending after every slot would mean three near-identical messages a day,
+    which trains you to ignore them. Notification fatigue makes the digest
+    worthless faster than no digest at all.
+    """
+    from ..notify.telegram import configured, send_digest  # noqa: PLC0415
+    from ..report.render import load_queue, render_clusters_table  # noqa: PLC0415
+
+    if not configured():
+        return
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    with db.connect() as conn:
+        if _get_state(conn, STATE_LAST_DIGEST) == today:
+            log.info("digest already sent today")
+            return
+        text = render_clusters_table(load_queue(conn), conn)
+
+    if send_digest(text):
+        with db.connect() as conn:
+            _set_state(conn, STATE_LAST_DIGEST, today)
+        log.info("digest sent")
+
+
 def scheduler_loop() -> None:
     hours = collect_hours()
     log.info("scheduler armed for %s UTC daily",
@@ -141,6 +169,7 @@ def scheduler_loop() -> None:
                 try:
                     asyncio.run(collect_once())
                     log.info("collection finished")
+                    maybe_send_digest()
                 except Exception:
                     log.exception("collection failed; will retry next slot")
 

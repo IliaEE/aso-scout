@@ -74,25 +74,9 @@ def main() -> None:
             return
 
         if args.clusters:
-            # Over-merging is the dangerous failure: a good niche can hide
-            # inside another cluster and never reach the report. This view
-            # exists so merging can be checked by eye rather than trusted.
-            from ..report.render import group_into_clusters  # noqa: PLC0415
+            from ..report.render import render_clusters_table  # noqa: PLC0415
 
-            groups = group_into_clusters(queue)
-            print(f"{len(groups)} ниш из {len(queue)} запросов\n")
-            for i, cl in enumerate(groups, start=1):
-                lead = cl.head.leader or {}
-                print(f'{i:2}. {cl.head.term}  ·  score {cl.head.score}  ·  '
-                      f'{cl.size} запр.')
-                print(f'    топ-1: {lead.get("title", "?")[:44]}')
-                for v in cl.variants:
-                    vl = (v.leader or {}).get("title", "?")[:34]
-                    mark = "" if vl == lead.get("title", "?")[:34] else f"   <- топ-1: {vl}"
-                    print(f'      · {v.term:<38} {v.score:>5}{mark}')
-                print()
-            print("Разные топ-1 внутри кластера помечены — если их много,")
-            print("склейка слишком агрессивна, поднимите cluster_overlap.")
+            print(render_clusters_table(queue, conn))
             return
 
         if args.prompt is not None:

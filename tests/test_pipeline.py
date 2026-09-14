@@ -460,6 +460,63 @@ check(not [g for g in _groups if g.head.term == "noise meter" and g.is_brand],
       "a real niche is not flagged as a brand")
 
 
+print("\n--- trends: never invent a direction ---")
+import tempfile as _tf2
+from pathlib import Path as _P2
+from src.report import trends as _tr
+
+_t2 = _P2(_tf2.mkdtemp()) / "tr.db"
+_db.init_db(str(_t2))
+with _db.connect(str(_t2)) as _c2:
+    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.NONE,
+          "no readings -> no arrow, not a guess")
+    for _d, _rc in [("2026-09-01", 1000), ("2026-09-02", 1010)]:
+        _c2.execute("INSERT INTO app_metrics_daily VALUES (1,'us',?,4.5,?)", (_d, _rc))
+    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.NONE,
+          "two readings is still not two windows")
+
+    # Two full windows, second one accelerating.
+    _c2.execute("DELETE FROM app_metrics_daily")
+    _pts = [("2026-08-31", 1000), ("2026-09-03", 1030), ("2026-09-07", 1070),
+            ("2026-09-10", 1200), ("2026-09-14", 1400)]
+    for _d, _rc in _pts:
+        _c2.execute("INSERT INTO app_metrics_daily VALUES (1,'us',?,4.5,?)", (_d, _rc))
+    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.UP,
+          f"accelerating reviews -> up: {_tr.traffic_trend(_c2, 1, 'us').arrow}")
+
+    # Autocomplete position: lower is better, so climbing means up.
+    for _pos, _ts in [(8, "2026-09-01T03:00:00+00:00"), (2, "2026-09-14T03:00:00+00:00")]:
+        _c2.execute("INSERT INTO suggestions (prefix,term,position,storefront,seen_at) "
+                    "VALUES ('n','noise meter',?,'us',?)", (_pos, _ts))
+    _dt = _tr.demand_trend(_c2, "noise meter", "us")
+    check(_dt.arrow == _tr.UP, f"rising in autocomplete -> up: {_dt.arrow} {_dt.detail}")
+    check(_tr.demand_trend(_c2, "never seen", "us").arrow == _tr.NONE,
+          "an unseen term gets no arrow")
+
+print("\n--- telegram digest ---")
+from src.notify.telegram import MAX_CHARS as _MAX, split_message as _split, send_digest as _send
+
+_lines = [f"строка {i} " + "x" * 80 for i in range(200)]
+_big = "\n".join(_lines)
+_chunks = _split(_big)
+check(all(len(c) <= _MAX for c in _chunks),
+      f"every chunk fits Telegram's limit: {[len(c) for c in _chunks]}")
+check(all(ln in _lines for c in _chunks for ln in c.split("\n")),
+      "no table row is cut in half across messages")
+check("".join(_chunks).replace("\n", "") == _big.replace("\n", ""),
+      "nothing is dropped while splitting")
+check(len(_split("x" * 9000)) == 3,
+      "an over-long single line is hard-wrapped rather than lost")
+
+
+class _Boom:
+    def send(self, text): raise RuntimeError("network down")
+
+
+check(_send("x", _Boom()) is False,
+      "a failed digest returns False instead of killing the run")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
