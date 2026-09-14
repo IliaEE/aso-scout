@@ -400,8 +400,14 @@ from src.report.rating import rate as _rate
 _r5 = _rate(49.3, 4, name_match=0.33)
 check(_r5.stars == 5, f"strong score + real cluster = 5 stars: {_r5.bar}")
 _rb = _rate(42.9, 1, name_match=1.0)
-check(_rb.stars <= 2 and "бренд?" in _rb.flags,
-      f"a brand query is pushed down despite a high score: {_rb.bar} {_rb.flags}")
+# Brands are flagged and routed to their own section, NOT star-penalised.
+# "sign now" proves people search for e-signature; burying it would throw
+# away a lead. Hiding it twice (low stars AND a separate list) is worse than
+# either alone.
+check("бренд?" in _rb.flags,
+      f"a brand query is flagged: {_rb.bar} {_rb.flags}")
+check("формулировку" in _rb.reason,
+      "the reason explains the demand is real but the phrasing is taken")
 _rs = _rate(42.0, 1, name_match=0.2)
 _rc = _rate(42.0, 4, name_match=0.2)
 check(_rc.stars > _rs.stars,
@@ -424,6 +430,34 @@ check([s.key for s in _cfg.storefronts_from_env()] == ["us"],
       "unknown codes are dropped, not fatal")
 _os.environ["STORES"] = "us"
 _il.reload(_cfg)
+
+
+print("\n--- report: storefronts stay separate, brands get their own list ---")
+from src.report.render import Candidate as _Cand, group_into_clusters as _gic
+
+def _c2(term, store, score, apps, feats=None):
+    return _Cand(term=term, storefront=store, score=score, notes=[], factors={},
+                 apps=apps, suggest_pos=1, features=feats or {})
+
+# The same niche in two markets shares most of its SERP. It must NOT collapse
+# into one row: two markets confirming a niche independently is the signal.
+_multi = [_c2("resize image", "us", 49.3, noise),
+          _c2("resize image", "gb", 47.0, noise[:9])]
+_cl = _gic(_multi)
+check(len(_cl) == 2, f"same term in two stores stays two entries: {len(_cl)}")
+check({c.head.storefront for c in _cl} == {"us", "gb"},
+      "each entry keeps its own storefront")
+
+# Distinct SERPs: a brand query that shared a SERP with a broad niche would
+# legitimately become a member of it, and the broader head should lead.
+_brandy = _c2("sign now", "us", 42.9, habit, {"top1_name_match": 1.0})
+_real = _c2("noise meter", "us", 45.0, noise, {"top1_name_match": 0.2})
+_groups = _gic([_brandy, _real])
+_b = [g for g in _groups if g.is_brand]
+check(len(_b) == 1 and _b[0].head.term == "sign now",
+      f"brand query is identified for its own section: {[g.head.term for g in _b]}")
+check(not [g for g in _groups if g.head.term == "noise meter" and g.is_brand],
+      "a real niche is not flagged as a brand")
 
 
 total = len(results)

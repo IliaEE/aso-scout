@@ -15,7 +15,7 @@ from typing import Any
 
 from ..config import settings
 from ..pipeline.cluster import build_clusters, eligible_head
-from .rating import LEGEND, rate
+from .rating import BRAND_SUSPECT, LEGEND, rate
 
 
 @dataclass
@@ -38,6 +38,17 @@ class ClusterCandidate:
     @property
     def size(self) -> int:
         return 1 + len(self.variants)
+
+    @property
+    def is_brand(self) -> bool:
+        """
+        The query is really an app's name.
+
+        Still a lead, not junk: "sign now" proves people search for
+        e-signature. It just cannot be won on that phrasing, so it belongs in
+        its own list rather than competing with genuine niches.
+        """
+        return float(self.head.features.get("top1_name_match") or 0.0) >= BRAND_SUSPECT
 
     @property
     def rating(self):
@@ -128,12 +139,22 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
 
 def group_into_clusters(candidates: list[Candidate]) -> list[ClusterCandidate]:
     """
-    Collapse keyword candidates into niches by SERP overlap.
+    Collapse keyword candidates into niches by SERP overlap, per storefront.
 
-    The head of each cluster is its highest-scoring member, which is not
-    necessarily the head cluster.py picked (that one optimises for SERP
-    breadth; here we want the best candidate to lead the report).
+    Partitioning by storefront is not cosmetic. The US and GB results for
+    "resize image" are largely the same apps, so clustering across stores
+    would merge them into one entry and destroy exactly the signal we want:
+    the same niche surfacing in several markets independently.
     """
+    out: list[ClusterCandidate] = []
+    stores = sorted({c.storefront for c in candidates})
+    for store in stores:
+        out.extend(_group_one_store([c for c in candidates if c.storefront == store]))
+    out.sort(key=lambda c: -c.score)
+    return out
+
+
+def _group_one_store(candidates: list[Candidate]) -> list[ClusterCandidate]:
     by_term = {c.term: c for c in candidates}
     serps = {c.term: c.apps for c in candidates if c.apps}
 
@@ -233,40 +254,81 @@ def render_text(
         return "\n".join(lines)
 
     clusters = group_into_clusters(candidates)
-    clusters.sort(key=lambda c: (-c.rating.stars, -c.score))
 
-    store = candidates[0].storefront.upper() if candidates else "?"
-    lines.append(f"НИШИ · {store} · {len(clusters)} из {len(candidates)} запросов")
+    # Same head term queued in several storefronts is independent
+    # confirmation: the niche is not a quirk of one market.
+    markets: dict[str, list[str]] = {}
+    for cl in clusters:
+        markets.setdefault(cl.head.term, []).append(cl.head.storefront.upper())
+
+    niches = [c for c in clusters if not c.is_brand]
+    brands = [c for c in clusters if c.is_brand]
+    niches.sort(key=lambda c: (-c.rating.stars, -c.score))
+    brands.sort(key=lambda c: -c.score)
+
+    stores = sorted({c.storefront.upper() for c in candidates})
+    lines.append(
+        f"НИШИ · {', '.join(stores)} · {len(niches)} из {len(candidates)} запросов"
+    )
     lines.append("")
-    lines.append(f"{'':7} {'ниша':<26} {'запр':>4}  {'лидер':<26} {'рейт':>5} {'отз':>6}")
-    lines.append("-" * 80)
+    lines.append(
+        f"{'':7} {'':3} {'ниша':<24} {'запр':>4}  {'лидер':<24} {'рейт':>5} {'отз':>6}"
+    )
+    lines.append("-" * 84)
 
-    shown = clusters[: settings.report_size] if settings.report_size else clusters
+    shown = niches[: settings.report_size] if settings.report_size else niches
     for cl in shown:
         c, r = cl.head, cl.rating
         leader = c.leader or {}
-        title = (leader.get("title") or "?")[:25]
         reviews = leader.get("rating_count") or 0
         rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
         lines.append(
-            f"{r.bar}  {c.term[:25]:<26} {cl.size:>4}  {title:<26} "
+            f"{r.bar}  {c.storefront.upper():<3} {c.term[:23]:<24} {cl.size:>4}  "
+            f"{(leader.get('title') or '?')[:23]:<24} "
             f"{leader.get('rating') or 0:>4.1f}★ {rev:>6}"
         )
-        if r.flags:
-            lines.append(f"{'':7} {' · '.join(r.flags)}")
+        also = [m for m in markets.get(c.term, []) if m != c.storefront.upper()]
+        meta = list(r.flags)
+        if also:
+            meta.append(f"также в {', '.join(also)}")
+        if meta:
+            lines.append(f"{'':11} {' · '.join(meta)}")
         if cl.variants:
             more = f" +{len(cl.variants) - 3}" if len(cl.variants) > 3 else ""
-            lines.append(f"{'':7} + {', '.join(v.term for v in cl.variants[:3])}{more}")
+            lines.append(
+                f"{'':11} + {', '.join(v.term for v in cl.variants[:3])}{more}"
+            )
         lines.append("")
 
-    if len(clusters) > len(shown):
-        lines.append(f"...ещё {len(clusters) - len(shown)} ниш — смотрите /clusters")
+    if len(niches) > len(shown):
+        lines.append(f"...ещё {len(niches) - len(shown)} ниш — смотрите /clusters")
+        lines.append("")
+
+    if brands:
+        lines.append("ЛИДЫ ИЗ БРЕНДОВЫХ ЗАПРОСОВ")
+        lines.append("  Формулировкой владеет чужое приложение, но спрос на саму")
+        lines.append("  задачу доказан. Смотреть руками: что за категория, есть ли")
+        lines.append("  в ней обобщённый запрос. Годятся и как цель для ASA на бренд.")
+        lines.append("")
+        for cl in brands[:8]:
+            c = cl.head
+            leader = c.leader or {}
+            reviews = leader.get("rating_count") or 0
+            rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
+            lines.append(
+                f"       {c.storefront.upper():<3} {c.term[:23]:<24} "
+                f"{'':>4}  {(leader.get('title') or '?')[:23]:<24} "
+                f"{leader.get('rating') or 0:>4.1f}★ {rev:>6}"
+            )
+        if len(brands) > 8:
+            lines.append(f"       ...ещё {len(brands) - 8}")
         lines.append("")
 
     top = shown[0] if shown else None
     if top:
         lines.append("ЧТО ДЕЛАТЬ")
-        lines.append(f'  "{top.head.term}" — {top.rating.reason}')
+        lines.append(f'  "{top.head.term}" ({top.head.storefront.upper()}) — '
+                     f'{top.rating.reason}')
         lines.append("")
 
     lines.append(LEGEND)

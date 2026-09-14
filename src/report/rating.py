@@ -69,11 +69,12 @@ def rate(
     reasons: list[str] = []
 
     if name_match >= BRAND_SUSPECT:
-        # Two stars, not one: occasionally a generic phrase really is the
-        # category name ("split screen"), and the human should still glance.
-        stars -= 2
+        # Flagged, not buried. The report routes brand queries into their own
+        # section, so there is no need to crush the score as well — and doing
+        # both would hide a real lead twice over.
         flags.append("бренд?")
-        reasons.append("запрос совпадает с названием топ-1 — вероятно ищут само приложение")
+        reasons.append("запрос совпадает с названием топ-1 — спрос на задачу есть, "
+                       "но формулировку держит чужое приложение")
     elif cluster_size >= CLUSTER_BONUS_AT:
         stars += 1
         reasons.append(f"кластер из {cluster_size} запросов — ниша, а не одиночный ключ")
@@ -107,6 +108,10 @@ LEGEND = """★ = насколько стоит тратить слот Astro, �
 «запр.» — сколько поисковых запросов в кластере: одна потребность,
 разные формулировки. Больше запросов = шире охват метаданными.
 
-Флаги: «бренд?» ищут конкретное приложение, а не нишу ·
+Брендовые запросы вынесены отдельным списком: спрос на задачу
+доказан, но саму формулировку занимает чужое приложение.
+
+Флаги: «бренд?» формулировкой владеет приложение ·
+«также в XX» ниша подтверждена в другом магазине ·
 «топ устарел» конкуренты заброшены · «нет лидера» точного
 совпадения в App Store нет"""
