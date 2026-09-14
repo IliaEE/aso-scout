@@ -90,10 +90,51 @@ STOREFRONT_IDS: dict[str, int] = {
 }
 
 
-STOREFRONTS: list[Storefront] = [
+# Available storefronts. Enable them with the STORES env var, e.g.
+# STORES=us,gb,ca,au.
+#
+# English-speaking stores share our English seed verbs, so they work out of the
+# box. Non-English stores do NOT: probing "scan" against the German store
+# returns what German users type, and our verb list has no German in it. Their
+# coverage will be thin until localized seeds are added — the opportunity there
+# is real (US niches with no localized competitor), but do not read a sparse
+# German queue as "no opportunities in Germany".
+ALL_STOREFRONTS: list[Storefront] = [
+    # English — seed verbs work as-is
     Storefront("us", "en", "United States", 143441),
+    Storefront("gb", "en", "United Kingdom", 143444),
+    Storefront("ca", "en", "Canada", 143455),
+    Storefront("au", "en", "Australia", 143460),
+    Storefront("ie", "en", "Ireland", 143449),
+    Storefront("nz", "en", "New Zealand", 143461),
+    # High-ARPU, mostly English-literate — seeds work partially
+    Storefront("ch", "de", "Switzerland", 143459),
+    Storefront("se", "sv", "Sweden", 143456),
+    Storefront("no", "no", "Norway", 143457),
+    Storefront("dk", "da", "Denmark", 143458),
+    Storefront("fi", "fi", "Finland", 143447),
+    Storefront("nl", "nl", "Netherlands", 143452),
+    # Large non-English — need localized seed verbs to be useful
     Storefront("de", "de", "Germany", 143443),
+    Storefront("fr", "fr", "France", 143442),
+    Storefront("jp", "ja", "Japan", 143462),
+    Storefront("ee", "et", "Estonia", 143518),
 ]
+
+
+def storefronts_from_env() -> list[Storefront]:
+    wanted = [s.strip().lower() for s in os.environ.get("STORES", "us").split(",")]
+    picked = [s for s in ALL_STOREFRONTS if s.key in wanted]
+    unknown = set(wanted) - {s.key for s in ALL_STOREFRONTS} - {""}
+    if unknown:
+        import logging
+        logging.getLogger(__name__).warning(
+            "unknown storefronts in STORES: %s", ", ".join(sorted(unknown))
+        )
+    return picked or [ALL_STOREFRONTS[0]]
+
+
+STOREFRONTS: list[Storefront] = storefronts_from_env()
 
 
 @dataclass
@@ -217,7 +258,7 @@ class Settings:
     astro_slots: int = field(default_factory=lambda: _env_int("ASTRO_SLOTS", 40))
 
     thresholds: Thresholds = field(default_factory=Thresholds)
-    storefronts: list[Storefront] = field(default_factory=lambda: list(STOREFRONTS))
+    storefronts: list[Storefront] = field(default_factory=storefronts_from_env)
 
     @property
     def use_postgres(self) -> bool:

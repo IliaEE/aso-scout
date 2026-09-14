@@ -7,6 +7,7 @@ untouched in the DB.
 """
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -35,6 +36,7 @@ class Features:
     paid_count: int
     games_share: float           # share of top-10 in the Games category
     top1_seller: str | None      # to detect platform giants
+    top1_name_match: float       # query vs top-1 name, 1.0 = the query IS the app
 
     # Relevance / demand proxies
     coherence: float
@@ -61,6 +63,49 @@ class Features:
             return None
         weekly = self.top1_weekly_review_delta * settings.thresholds.review_to_install_multiplier
         return int(weekly * 4.33)
+
+
+# Words that carry no brand meaning in an App Store title.
+_TITLE_NOISE = {"app", "free", "pro", "plus", "premium", "lite", "hd", "the",
+                "for", "ios", "iphone", "ipad", "editor", "maker"}
+
+
+def name_match(term: str, title: str) -> float:
+    """
+    How closely the query matches the top-1 app's *name*, 0..1.
+
+    A high value means the query is probably a brand: people typing "count the
+    kicks" want the app called "Count the Kicks!", not a category of
+    kick-counting apps. A live queue had six such entries out of 33 — they
+    pass every gate because the SERP is perfectly coherent, which is exactly
+    what makes them deceptive.
+
+    Only the part of the title before the first separator is compared: App
+    Store titles are "Name: keyword keyword keyword", and the keyword tail
+    would otherwise match anything in the niche.
+    """
+    if not title:
+        return 0.0
+    head = re.split(r"[:\-|–—]", title, maxsplit=1)[0]
+    norm = lambda t: {  # noqa: E731
+        w for w in re.sub(r"[^a-z0-9\s]", " ", t.lower()).split()
+        if w and w not in _TITLE_NOISE
+    }
+    q, h = norm(term), norm(head)
+    if not q or not h:
+        return 0.0
+
+    # Brands routinely close the gap the query leaves open: "sign now" is
+    # "SignNow", "pic sart" is "PicsArt". Token comparison alone scores those
+    # zero, so compare the space-free forms too and take the stronger signal.
+    if "".join(sorted(q)) and "".join(q) == "".join(h):
+        return 1.0
+    flat_q = "".join(re.sub(r"[^a-z0-9]", "", term.lower()))
+    flat_h = "".join(re.sub(r"[^a-z0-9]", "", head.lower()))
+    if flat_q and flat_q == flat_h:
+        return 1.0
+
+    return len(q & h) / max(len(q | h), 1)
 
 
 def _median_or_none(values: list[float]) -> float | None:
@@ -124,6 +169,7 @@ def extract(
             or "Games" in (a.get("genres") or [])
         ) / n,
         top1_seller=(top10[0].get("seller") if top10 else None),
+        top1_name_match=name_match(term, top10[0].get("title", "")) if top10 else 0.0,
         monetized_count=sum(1 for a in top10 if a.get("is_monetized")),
         paid_count=sum(1 for a in top10 if a.get("is_paid")),
         coherence=coherence_score(term, top10),

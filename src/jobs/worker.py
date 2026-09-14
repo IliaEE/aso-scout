@@ -62,8 +62,8 @@ async def collect_once() -> None:
     """One pass over every configured storefront."""
     roots_per_run = int(os.environ.get("ROOTS_PER_RUN", 8))
     max_snapshots = int(os.environ.get("MAX_SNAPSHOTS", 60))
-    wanted = [s.strip().lower() for s in os.environ.get("STORES", "us").split(",")]
-    stores = [s for s in settings.storefronts if s.key in wanted] or settings.storefronts[:1]
+    # settings.storefronts already reflects STORES.
+    stores = settings.storefronts
 
     async with AppleClient() as client:
         for store in stores:

@@ -379,6 +379,53 @@ with _db.connect(str(_tmp)) as _c:
           "a single reading cannot produce an alert — hence the refresh step")
 
 
+print("\n--- brand queries that look like niches ---")
+from src.pipeline.features import name_match as _nm
+for _q, _t, _brand in [
+    ("count the kicks", "Count the Kicks!", True),
+    ("scan halal", "Scan Halal", True),
+    ("sign now", "SignNow: e-Signature app", True),   # concatenated brand
+    ("sign me", "Sign.Me", True),
+    ("monitor your weight", "Monitor Your Weight", True),
+    ("resize image", "Image Size", False),
+    ("compress image", "Compress Photos & Pictures", False),
+    ("scan pokemon cards", "Collectr - TCG Collector App", False),
+]:
+    _v = _nm(_q, _t)
+    check((_v >= 0.75) is _brand,
+          f'"{_q}" vs "{_t}" -> {_v:.2f} ({"бренд" if _brand else "ниша"})')
+
+print("\n--- star rating ---")
+from src.report.rating import rate as _rate
+_r5 = _rate(49.3, 4, name_match=0.33)
+check(_r5.stars == 5, f"strong score + real cluster = 5 stars: {_r5.bar}")
+_rb = _rate(42.9, 1, name_match=1.0)
+check(_rb.stars <= 2 and "бренд?" in _rb.flags,
+      f"a brand query is pushed down despite a high score: {_rb.bar} {_rb.flags}")
+_rs = _rate(42.0, 1, name_match=0.2)
+_rc = _rate(42.0, 4, name_match=0.2)
+check(_rc.stars > _rs.stars,
+      f"same score, bigger cluster rates higher: {_rs.bar} vs {_rc.bar}")
+check(_rate(10.0, 1).stars == 1 and _rate(99.0, 5).stars == 5,
+      "stars stay inside 1..5")
+check(_rate(30.0, 2).reason, "every rating carries a human-readable reason")
+
+print("\n--- storefronts ---")
+import os as _os, importlib as _il
+import src.config as _cfg
+_os.environ["STORES"] = "us,gb,ca,au"
+_il.reload(_cfg)
+_st = _cfg.storefronts_from_env()
+check([s.key for s in _st] == ["us", "gb", "ca", "au"],
+      f"STORES selects storefronts: {[s.key for s in _st]}")
+check(all(s.store_id > 143000 for s in _st), "each has a numeric storefront ID")
+_os.environ["STORES"] = "us,bogus"
+check([s.key for s in _cfg.storefronts_from_env()] == ["us"],
+      "unknown codes are dropped, not fatal")
+_os.environ["STORES"] = "us"
+_il.reload(_cfg)
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")

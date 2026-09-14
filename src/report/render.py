@@ -15,6 +15,7 @@ from typing import Any
 
 from ..config import settings
 from ..pipeline.cluster import build_clusters, eligible_head
+from .rating import LEGEND, rate
 
 
 @dataclass
@@ -38,6 +39,17 @@ class ClusterCandidate:
     def size(self) -> int:
         return 1 + len(self.variants)
 
+    @property
+    def rating(self):
+        f = self.head.features
+        return rate(
+            score=self.head.score,
+            cluster_size=self.size,
+            name_match=float(f.get("top1_name_match") or 0.0),
+            stale_share=float(f.get("stale_share") or 0.0),
+            top1_relevance=float(f.get("top1_relevance") or 1.0),
+        )
+
 
 @dataclass
 class Candidate:
@@ -48,6 +60,7 @@ class Candidate:
     factors: dict[str, float]
     apps: list[dict[str, Any]]
     suggest_pos: int | None
+    features: dict[str, Any] = field(default_factory=dict)
 
     @property
     def why(self) -> str:
@@ -78,6 +91,9 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
         """
         SELECT k.term, k.storefront, k.suggest_pos,
                s.score, s.notes, s.factors,
+               (SELECT payload FROM keyword_features kf
+                 WHERE kf.keyword_id = k.id
+                 ORDER BY kf.computed_at DESC LIMIT 1) AS feats,
                (SELECT raw FROM serp_snapshots sp
                  WHERE sp.keyword_id = k.id
                  ORDER BY sp.taken_at DESC LIMIT 1) AS serp
@@ -104,6 +120,7 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
                 factors=json.loads(r["factors"] or "{}"),
                 apps=json.loads(r["serp"] or "[]"),
                 suggest_pos=r["suggest_pos"],
+                features=json.loads(r["feats"] or "{}"),
             )
         )
     return out
@@ -216,34 +233,46 @@ def render_text(
         return "\n".join(lines)
 
     clusters = group_into_clusters(candidates)
-    lines.append(f"НИШИ ({len(clusters)}) из {len(candidates)} запросов")
-    lines.append("")
+    clusters.sort(key=lambda c: (-c.rating.stars, -c.score))
 
-    for i, cl in enumerate(clusters[: settings.report_size], start=1):
-        c = cl.head
-        leader = c.leader
+    store = candidates[0].storefront.upper() if candidates else "?"
+    lines.append(f"НИШИ · {store} · {len(clusters)} из {len(candidates)} запросов")
+    lines.append("")
+    lines.append(f"{'':7} {'ниша':<26} {'запр':>4}  {'лидер':<26} {'рейт':>5} {'отз':>6}")
+    lines.append("-" * 80)
+
+    shown = clusters[: settings.report_size] if settings.report_size else clusters
+    for cl in shown:
+        c, r = cl.head, cl.rating
+        leader = c.leader or {}
+        title = (leader.get("title") or "?")[:25]
+        reviews = leader.get("rating_count") or 0
+        rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
         lines.append(
-            f'{i}. "{c.term}" · {c.storefront.upper()} · '
-            f'score {c.score} ({c.band})'
+            f"{r.bar}  {c.term[:25]:<26} {cl.size:>4}  {title:<26} "
+            f"{leader.get('rating') or 0:>4.1f}★ {rev:>6}"
         )
-        lines.append(f"   {c.why}")
-        if leader:
-            lines.append(
-                f'   Лидер: {leader.get("title", "?")} '
-                f'{leader.get("rating") or 0:.1f}★ '
-                f'{leader.get("rating_count") or 0} отзывов'
-                + ("  ·  платный" if leader.get("is_paid") else "")
-            )
-        for note in c.notes[1:3]:
-            lines.append(f"   {note}")
+        if r.flags:
+            lines.append(f"{'':7} {' · '.join(r.flags)}")
         if cl.variants:
-            shown = ", ".join(v.term for v in cl.variants[:4])
-            more = f" (+{len(cl.variants) - 4})" if len(cl.variants) > 4 else ""
-            lines.append(f"   Кластер ({cl.size} запросов): {shown}{more}")
-        lines.append("   [промпт кластера]  [в Astro]  [отклонить]")
+            more = f" +{len(cl.variants) - 3}" if len(cl.variants) > 3 else ""
+            lines.append(f"{'':7} + {', '.join(v.term for v in cl.variants[:3])}{more}")
         lines.append("")
 
-    lines += ["-" * 58,
-              "Спрос здесь косвенный. Точные цифры даст только Astro",
-              "на шаге подтверждения."]
+    if len(clusters) > len(shown):
+        lines.append(f"...ещё {len(clusters) - len(shown)} ниш — смотрите /clusters")
+        lines.append("")
+
+    top = shown[0] if shown else None
+    if top:
+        lines.append("ЧТО ДЕЛАТЬ")
+        lines.append(f'  "{top.head.term}" — {top.rating.reason}')
+        lines.append("")
+
+    lines.append(LEGEND)
+    lines.append("")
+
+    lines += ["-" * 80,
+              "Звёзды ранжируют внимание, а не предсказывают успех.",
+              "Спрос здесь косвенный — точные цифры даёт только Astro."]
     return "\n".join(lines)
