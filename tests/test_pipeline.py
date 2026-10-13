@@ -722,11 +722,18 @@ _c2.available_models = lambda: _account
 check(_c2._downgrade() is False,
       "an explicitly pinned model is respected and never swapped out")
 
-# Pacing: free tiers cap requests per minute, not just tokens.
-_os5.environ["GROQ_RPM"] = "12"
-check(abs(_GC()._min_interval - 5.0) < 0.01,
-      "GROQ_RPM sets the gap between calls")
+# Pacing takes whichever limit binds first. GROQ_RPM only decides the gap
+# when requests are the tighter constraint; on the free tier tokens are.
+_os5.environ["GROQ_RPM"] = "4"
+_os5.environ["GROQ_TPM"] = "1000000"
+check(abs(_GC()._min_interval - 15.0) < 0.01,
+      "with tokens plentiful, GROQ_RPM sets the gap")
+_os5.environ["GROQ_RPM"] = "60"
+_os5.environ["GROQ_TPM"] = "8000"
+check(_GC()._min_interval > 1.0,
+      "with tokens scarce, the token budget overrides a generous RPM")
 _os5.environ.pop("GROQ_RPM", None)
+_os5.environ.pop("GROQ_TPM", None)
 _os5.environ.pop("GROQ_API_KEY", None)
 
 
@@ -753,6 +760,59 @@ check("Частичная польза" in _summ(_half), "partial accuracy is re
 _apps = _ca("Life360: Family Safety & GPS", "Life360", 4.8, 3_058_000)
 check(len(_apps) == 3 and _apps[0]["rating_count"] == 3_058_000,
       "cases build a SERP shaped like a real one")
+
+
+print("\n--- long jobs must not hold the write lock ---")
+import sqlite3 as _sq3, tempfile as _tf6
+from pathlib import Path as _P6
+
+_lockdb = str(_P6(_tf6.mkdtemp()) / "lock.db")
+_db.init_db(_lockdb)
+with _db.connect(_lockdb) as _lc:
+    check(_lc.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000,
+          "a busy writer is waited for, not failed on instantly")
+    check(_lc.execute("PRAGMA journal_mode").fetchone()[0] == "wal",
+          "WAL lets the report read while the collector writes")
+
+# A second connection must be able to write while the first one is open —
+# the nightly collector used to wrap its whole run in one transaction, so a
+# rescore from the shell died with "database is locked".
+_c_a = _sq3.connect(_lockdb, timeout=5.0)
+_c_a.execute("PRAGMA busy_timeout=5000")
+_c_a.execute("INSERT INTO run_state (key, value) VALUES ('a', '1')"
+             if _c_a.execute("SELECT name FROM sqlite_master WHERE name='run_state'").fetchone()
+             else "CREATE TABLE run_state (key TEXT PRIMARY KEY, value TEXT)")
+_c_a.commit()
+try:
+    with _db.connect(_lockdb) as _c_b:
+        _c_b.execute("CREATE TABLE IF NOT EXISTS probe (x INTEGER)")
+        _c_b.execute("INSERT INTO probe VALUES (1)")
+    _ok_concurrent = True
+except Exception:
+    _ok_concurrent = False
+_c_a.close()
+check(_ok_concurrent, "a second writer succeeds once the first has committed")
+
+print("\n--- pacing follows the limit that actually binds ---")
+import os as _os7, importlib as _il7
+import src.llm.provider as _pr7
+
+for _k in ("GROQ_TPM", "GROQ_TOKENS_PER_CALL", "GROQ_RPM"):
+    _os7.environ.pop(_k, None)
+_os7.environ["GROQ_API_KEY"] = "test"
+_il7.reload(_pr7)
+_free = _pr7.GroqChat()._min_interval
+check(6.0 < _free < 9.0,
+      f"the free tier's 8000 TPM throttles to ~8 calls/min, not 20: {_free:.1f}s")
+
+_os7.environ["GROQ_TPM"] = "30000"
+_il7.reload(_pr7)
+_paid = _pr7.GroqChat()._min_interval
+check(_paid < _free, f"a higher token budget speeds it up: {_paid:.1f}s")
+
+for _k in ("GROQ_TPM", "GROQ_TOKENS_PER_CALL", "GROQ_RPM", "GROQ_API_KEY"):
+    _os7.environ.pop(_k, None)
+_il7.reload(_pr7)
 
 
 total = len(results)

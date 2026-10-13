@@ -83,6 +83,7 @@ def run(limit: int, requeue: bool = False) -> dict[str, int]:
                     break
                 continue
             save_verdict(conn, c.term, c.storefront, v, db.now_iso())
+            conn.commit()
             stats[v.category] += 1
             log.info("  %-26s %-10s %.0f%%  %s",
                      c.term[:26], v.category, v.confidence * 100, v.niche_name)

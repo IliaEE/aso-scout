@@ -131,11 +131,28 @@ class GroqChat:
         self._retried_429 = False
         self._tried: set[str] = set()
         self._last_call = 0.0
+        # The binding limit on Groq's free tier is tokens per minute, not
+        # requests: the error body reads "tokens per minute (TPM): Limit 8000"
+        # while each judgement costs roughly 950. Pacing by requests alone
+        # produced a 429 on almost every other call.
         try:
-            rpm = float(os.environ.get("GROQ_RPM", 20))
+            tpm = float(os.environ.get("GROQ_TPM", 8000))
         except ValueError:
-            rpm = 20.0
-        self._min_interval = 60.0 / rpm if rpm > 0 else 0.0
+            tpm = 8000.0
+        try:
+            est = float(os.environ.get("GROQ_TOKENS_PER_CALL", 1000))
+        except ValueError:
+            est = 1000.0
+        token_interval = 60.0 / max(tpm / max(est, 1), 1) if tpm > 0 else 0.0
+
+        try:
+            rpm = float(os.environ.get("GROQ_RPM", 30))
+        except ValueError:
+            rpm = 30.0
+        request_interval = 60.0 / rpm if rpm > 0 else 0.0
+
+        # Whichever limit binds first.
+        self._min_interval = max(token_interval, request_interval)
 
     @property
     def configured(self) -> bool:

@@ -57,6 +57,7 @@ async def harvest(
         )
         if found:
             db.store_suggestions(conn, root, store.key, found)
+            conn.commit()
         for term, pos in found.items():
             if term not in all_found or pos < all_found[term]:
                 all_found[term] = pos
@@ -202,6 +203,10 @@ async def run(
 
             s = scoring.score(f)
             db.store_score(conn, kw_id, f.as_dict(), s)
+            # Release the write lock between keywords. Holding one
+            # transaction for the whole pass locked the database for the
+            # entire run, so nothing else could touch it for 15-40 minutes.
+            conn.commit()
             stats[s.verdict.value] += 1
             # Per-gate counters. Without these, "rejected: 19" says nothing
             # about whether the thresholds are sane or the roots were bad.

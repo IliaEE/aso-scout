@@ -96,6 +96,7 @@ def main() -> None:
                 continue
 
             db.store_score(conn, r["id"], f.as_dict(), s)
+            conn.commit()
             after[s.verdict.value] += 1
             for g in s.gates_failed:
                 after[f"gate_{g}"] += 1
