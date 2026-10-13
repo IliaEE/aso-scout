@@ -90,6 +90,48 @@ async def main() -> int:
             print("  valid. Move to a different host before collecting anything.")
             problems += 1
 
+    # --- LLM layer -------------------------------------------------------
+    from ..llm.provider import chat_for  # noqa: PLC0415
+
+    print("\nLLM")
+    for task, label in (("judge", "судья"), ("ideate", "генератор идей")):
+        chat = chat_for(task)
+        if chat is None:
+            print(f"  [{WARN}] {label}: ключ не задан — работают только эвристики")
+            continue
+
+        models = chat.available_models()
+        if not models:
+            print(f"  [{BAD}] {label}: список моделей не получен — ключ неверный "
+                  f"или отозван")
+            problems += 1
+            continue
+
+        model = chat.resolve_model()
+        if not model:
+            print(f"  [{BAD}] {label}: нет пригодной модели среди {len(models)}")
+            problems += 1
+            continue
+
+        # Which organization this key belongs to decides whether the two keys
+        # share a rate limit. Same org means a second key bought nothing.
+        reply = chat.complete(
+            'Reply with exactly {"ok": true} and nothing else.',
+            "ping",
+            max_tokens=20,
+        )
+        if reply is None:
+            print(f"  [{BAD}] {label}: {model} не отвечает")
+            problems += 1
+            continue
+
+        shared = ""
+        if task == "ideate":
+            other = chat_for("judge")
+            if other is not None and other.api_key == chat.api_key:
+                shared = "  (тот же ключ, что у судьи)"
+        print(f"  [{OK}] {label}: {model}, пауза {chat._min_interval:.1f}с{shared}")
+
     print("\n" + "=" * 46)
     if problems:
         print(f"{problems} blocking problem(s). Fix before collecting.")
