@@ -3,3 +3,7 @@ rapidfuzz>=3.9
 inflect>=7.3
 # Postgres on Railway; SQLite locally needs nothing extra.
 # psycopg not needed: SQLite on a Railway volume is simpler and enough here.
+
+# Apple Ads Platform API: ES256 client secret signing
+pyjwt>=2.8
+cryptography>=42

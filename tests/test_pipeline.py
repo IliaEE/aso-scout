@@ -923,6 +923,71 @@ _terms = {c.head.term for c in _gci(_multi)}
 check(len(_terms) == 1, f"one seed per term, not one per storefront: {_terms}")
 
 
+print("\n--- Apple Ads credentials ---")
+from src.asa.auth import (Credentials as _Cr, make_client_secret as _mcs,
+                          days_until_expiry as _due, describe_key_problem as _dkp,
+                          MAX_SECRET_DAYS as _MSD, AuthError as _AE)
+import subprocess as _sp, tempfile as _tfa
+from pathlib import Path as _Pa
+import jwt as _jwt
+
+_kd = _Pa(_tfa.mkdtemp())
+_sp.run(["openssl", "ecparam", "-genkey", "-name", "prime256v1", "-noout",
+         "-out", str(_kd / "sec1.pem")], capture_output=True, check=True)
+_sp.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", str(_kd / "sec1.pem"),
+         "-out", str(_kd / "pk8.pem")], capture_output=True, check=True)
+_sp.run(["openssl", "ec", "-in", str(_kd / "pk8.pem"), "-pubout",
+         "-out", str(_kd / "pub.pem")], capture_output=True, check=True)
+_pk8 = (_kd / "pk8.pem").read_text()
+_sec1 = (_kd / "sec1.pem").read_text()
+_pub = (_kd / "pub.pem").read_text()
+
+# Every one of these fails identically from Apple's side, so the diagnosis
+# has to happen locally or the user is left guessing.
+check(_dkp(_pk8) is None, "a PKCS#8 key is accepted")
+check("PKCS#8" in (_dkp(_sec1) or ""),
+      "the SEC1 key openssl produces by default is named as the problem")
+check("публичный" in (_dkp(_pub) or ""), "a public key pasted by mistake is caught")
+check("пустой" in (_dkp("") or ""), "an unset variable is caught")
+check("\\n" in (_dkp(_pk8.replace("\n", "\\n")) or ""),
+      "a key flattened into one line is caught")
+
+_creds = _Cr("CLIENT.x", "TEAM.y", "KEY.z", "99", _pk8)
+_secret = _mcs(_creds)
+_hdr = _jwt.get_unverified_header(_secret)
+check(_hdr["alg"] == "ES256" and _hdr["kid"] == "KEY.z",
+      f"the header carries ES256 and the key id: {_hdr}")
+
+from cryptography.hazmat.primitives.serialization import load_pem_public_key as _lpk
+_claims = _jwt.decode(_secret, _lpk(_pub.encode()), algorithms=["ES256"],
+                      audience="https://appleid.apple.com")
+check(_claims["iss"] == "TEAM.y" and _claims["sub"] == "CLIENT.x",
+      "the team issues it and the client is its subject")
+check(_jwt.decode(_secret, options={"verify_signature": False})["aud"]
+      == "https://appleid.apple.com", "the audience is Apple's identity service")
+
+_left = _due(_secret)
+check(_left is not None and _left <= _MSD,
+      f"expiry is inside Apple's 180-day cap: {_left} days")
+check(_mcs(_creds, valid_days=9999) and _due(_mcs(_creds, valid_days=9999)) <= _MSD,
+      "asking for longer than the cap is clamped, not sent and rejected")
+
+try:
+    _mcs(_Cr("a", "b", "c", "d", _sec1))
+    _raised = False
+except _AE:
+    _raised = True
+check(_raised, "signing with a bad key raises a readable error, not a stack trace")
+
+from src.jobs.asa_check import last_full_week as _lfw
+from datetime import date as _dte
+_s, _e = _lfw()
+check(_dte.fromisoformat(_s).weekday() == 6, "the week starts on a Sunday")
+check(_dte.fromisoformat(_e).weekday() == 5, "and ends on a Saturday")
+check(_dte.fromisoformat(_e) < _dte.today(),
+      "and is already finished, so Apple has had time to publish it")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
