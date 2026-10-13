@@ -117,6 +117,27 @@ def collect_hours() -> list[int]:
     return sorted(set(hours)) or [3]
 
 
+def maybe_judge() -> None:
+    """
+    Classify new candidates before the digest goes out.
+
+    Order matters: judging after sending would mean the message always shows
+    yesterday's verdicts. Failures are swallowed — a missing verdict degrades
+    the report, a raised exception would lose the whole collection run.
+    """
+    import os as _os  # noqa: PLC0415
+
+    if not _os.environ.get("GROQ_API_KEY"):
+        return
+    try:
+        from .judge import run as judge_run  # noqa: PLC0415
+
+        stats = judge_run(int(_os.environ.get("JUDGE_PER_RUN", 30)))
+        log.info("judged: %s", stats)
+    except Exception:
+        log.exception("judging failed; report falls back to heuristics")
+
+
 def maybe_send_digest() -> None:
     """
     Push the cluster table to Telegram, at most once per calendar day.
@@ -141,6 +162,9 @@ def maybe_send_digest() -> None:
     if send_digest(text):
         with db.connect() as conn:
             _set_state(conn, STATE_LAST_DIGEST, today)
+            # Separate timestamp: the next digest diffs against the moment
+            # this one was rendered, not against midnight.
+            _set_state(conn, "last_digest_at", datetime.now(timezone.utc).isoformat())
         log.info("digest sent")
 
 
@@ -169,6 +193,7 @@ def scheduler_loop() -> None:
                 try:
                     asyncio.run(collect_once())
                     log.info("collection finished")
+                    maybe_judge()
                     maybe_send_digest()
                 except Exception:
                     log.exception("collection failed; will retry next slot")

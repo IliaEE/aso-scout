@@ -40,6 +40,19 @@ class ClusterCandidate:
     def size(self) -> int:
         return 1 + len(self.variants)
 
+    def is_new(self, since: str | None) -> bool:
+        """
+        First seen after the last digest.
+
+        This is the answer to "it keeps showing me the same ideas". The queue
+        is cumulative by design — a good niche does not stop being good — but
+        without a marker every reading starts from scratch and the genuinely
+        new rows are invisible among forty familiar ones.
+        """
+        if not since or not self.head.first_seen:
+            return False
+        return self.head.first_seen > since
+
     @property
     def is_broad(self) -> bool:
         """
@@ -59,8 +72,26 @@ class ClusterCandidate:
         Still a lead, not junk: "sign now" proves people search for
         e-signature. It just cannot be won on that phrasing, so it belongs in
         its own list rather than competing with genuine niches.
+
+        An LLM verdict overrides the heuristic in both directions — it catches
+        "rename" -> Remini, which fuzzy matching scores at 50 and lets past.
         """
+        v = self.head.verdict
+        if v is not None:
+            return bool(getattr(v, "is_brand", False))
         return float(self.head.features.get("top1_name_match") or 0.0) >= BRAND_SUSPECT
+
+    @property
+    def is_junk(self) -> bool:
+        """Judged too broad or implausible. Kept out of the main list."""
+        v = self.head.verdict
+        return v is not None and getattr(v, "category", "") in {"too_broad", "junk"}
+
+    @property
+    def display_name(self) -> str:
+        v = self.head.verdict
+        name = getattr(v, "niche_name", "") if v is not None else ""
+        return name or self.head.term
 
     @property
     def rating(self):
@@ -84,6 +115,8 @@ class Candidate:
     apps: list[dict[str, Any]]
     suggest_pos: int | None
     features: dict[str, Any] = field(default_factory=dict)
+    first_seen: str | None = None
+    verdict: Any = None          # llm.judge.Verdict, when one exists
 
     @property
     def why(self) -> str:
@@ -113,7 +146,7 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
     rows = conn.execute(
         """
         SELECT k.term, k.storefront, k.suggest_pos,
-               s.score, s.notes, s.factors,
+               s.score, s.notes, s.factors, k.first_seen,
                (SELECT payload FROM keyword_features kf
                  WHERE kf.keyword_id = k.id
                  ORDER BY kf.computed_at DESC LIMIT 1) AS feats,
@@ -132,6 +165,12 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
         (n,),
     ).fetchall()
 
+    try:
+        from ..llm.judge import load_verdicts  # noqa: PLC0415
+        verdicts = load_verdicts(conn)
+    except Exception:
+        verdicts = {}
+
     out = []
     for r in rows:
         out.append(
@@ -144,6 +183,8 @@ def load_queue(conn: sqlite3.Connection, limit: int | None = None) -> list[Candi
                 apps=json.loads(r["serp"] or "[]"),
                 suggest_pos=r["suggest_pos"],
                 features=json.loads(r["feats"] or "{}"),
+                first_seen=r["first_seen"],
+                verdict=verdicts.get((r["term"], r["storefront"])),
             )
         )
     return out
@@ -352,6 +393,17 @@ def render_text(
     return "\n".join(lines)
 
 
+def last_digest_at(conn) -> str | None:
+    """Timestamp of the previous digest, used to mark what is new."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM run_state WHERE key = 'last_digest_at'"
+        ).fetchone()
+    except Exception:
+        return None
+    return row["value"] if row else None
+
+
 def render_clusters_table(
     candidates: list[Candidate],
     conn=None,
@@ -368,8 +420,9 @@ def render_clusters_table(
     of it. `conn` is optional so the table can be rendered without a database.
     """
     clusters = group_into_clusters(candidates)
-    niches = [c for c in clusters if not c.is_brand]
+    niches = [c for c in clusters if not c.is_brand and not c.is_junk]
     brands = [c for c in clusters if c.is_brand]
+    junk = [c for c in clusters if c.is_junk and not c.is_brand]
     niches.sort(key=lambda c: (-c.rating.stars, -c.score))
     brands.sort(key=lambda c: -c.score)
 
@@ -379,9 +432,13 @@ def render_clusters_table(
 
     days = tr.history_days(conn) if conn is not None else 0
     stores = sorted({c.storefront.upper() for c in candidates})
+    since = last_digest_at(conn) if conn is not None else None
+    fresh = [c for c in niches if c.is_new(since)]
 
     out: list[str] = []
     out.append(f"НИШИ · {', '.join(stores)} · {len(niches)} из {len(candidates)} запросов")
+    if since:
+        out.append(f"новых с прошлого дайджеста: {len(fresh)}")
     if days < 14:
         out.append(f"история {days} дн. — тренды появятся примерно через 2 недели")
     out.append("")
@@ -390,6 +447,10 @@ def render_clusters_table(
         f"{'лидер':<26}{'рейт':>5}{'отз':>7} {'стар':>5}"
     )
     out.append("─" * 96)
+
+    # New entries first, then by rating. Otherwise a fresh find sits at row
+    # 28 behind the same familiar names every single day.
+    niches.sort(key=lambda c: (not c.is_new(since), -c.rating.stars, -c.score))
 
     rows = niches[:limit] if limit else niches
     for cl in rows:
@@ -426,7 +487,20 @@ def render_clusters_table(
             f"{lead.get('rating') or 0:>4.1f}★{rev:>7} {stale_s:>5}"
         )
 
+        v = c.verdict
         meta = list(r.flags)
+        if v is not None:
+            mon = {"subscription": "подписка", "one_time": "разовая покупка",
+                   "ads": "реклама", "unclear": "монетизация неясна"}.get(
+                       getattr(v, "monetization", ""), "")
+            if mon:
+                meta.append(mon)
+            if getattr(v, "intent", "") == "informational":
+                meta.append("информационный запрос")
+            if getattr(v, "note", ""):
+                meta.append(str(v.note)[:90])
+        if cl.is_new(since):
+            meta.insert(0, "НОВОЕ")
         if cl.is_broad:
             meta.append("широкий запрос")
         also = [m for m in markets.get(c.term, []) if m != c.storefront.upper()]
@@ -439,6 +513,12 @@ def render_clusters_table(
         if cl.variants:
             more = f" +{len(cl.variants) - 3}" if len(cl.variants) > 3 else ""
             out.append(f"{'':12}+ {', '.join(v.term for v in cl.variants[:3])}{more}")
+
+    if junk:
+        out.append("")
+        out.append(f"ОТСЕЯНО СУДЬЁЙ: {len(junk)} "
+                   f"(широкие или бессмысленные запросы) — "
+                   + ", ".join(c.head.term for c in junk[:10]))
 
     if brands:
         out.append("")
