@@ -108,12 +108,30 @@ async def run(seed_count: int, dry_run: bool = False) -> dict[str, int]:
     with db.connect() as conn:
         ensure_table(conn)
         clusters = group_into_clusters(load_queue(conn))
-        # Seed from the strongest niches: adjacency to a good niche is more
-        # likely to be good than adjacency to a weak one.
-        seeds = sorted(clusters, key=lambda c: -c.rating.stars)[:seed_count]
+
+        # Seed only from real niches. The first live run seeded from "now"
+        # (NOW TV) and "pet desk" (PetDesk) because brands were never filtered
+        # out, and asked the model for queries adjacent to two app names. All
+        # forty proposals failed. Garbage in.
+        usable = [c for c in clusters if not c.is_brand and not c.is_junk]
+
+        # One seed per term. The same niche appearing in several storefronts
+        # produced duplicate generations and spent the token budget twice on
+        # the same answer.
+        seen_terms: set[str] = set()
+        seeds: list = []
+        for cl in sorted(usable, key=lambda c: (-c.rating.stars, -c.score)):
+            if cl.head.term in seen_terms:
+                continue
+            seen_terms.add(cl.head.term)
+            seeds.append(cl)
+            if len(seeds) >= seed_count:
+                break
+
         if not seeds:
-            log.warning("queue is empty — collect first")
+            log.warning("no niches to seed from (queue empty, or all brands)")
             return {}
+        log.info("seeding from: %s", ", ".join(c.head.term for c in seeds))
 
         for cl in seeds:
             c = cl.head
@@ -161,10 +179,20 @@ def main() -> int:
                     help="show proposals without verifying or storing them")
     ap.add_argument("--stats", action="store_true",
                     help="how past proposals fared")
+    ap.add_argument("--forget", action="store_true",
+                    help="erase past proposals so a changed setup is measured "
+                         "on its own rather than against an old mistake")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
     db.init_db()
+
+    if args.forget:
+        with db.connect() as conn:
+            n = conn.execute("DELETE FROM llm_proposals").rowcount
+            conn.commit()
+        print(f"забыто предложений: {n}")
+        return 0
 
     if args.stats:
         with db.connect() as conn:
@@ -179,8 +207,9 @@ def main() -> int:
             print(f"  {status:<12} {n:>4}  ({n / total:.0%})")
         print()
         if accepted == 0 and total >= 20:
-            print("Ни одно предложение не прошло проверку. Модель выдумывает "
-                  "запросы, которых не ищут — слой стоит отключить.")
+            print("Ни одно предложение не прошло проверку.")
+            print("Если засев шёл от настоящих ниш, а не от брендов — модель")
+            print("выдумывает запросы, которых не ищут. Отключить: IDEATE=0")
         elif total:
             print(f"доля прошедших: {accepted / total:.0%}")
         return 0

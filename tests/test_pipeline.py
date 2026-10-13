@@ -892,6 +892,37 @@ check(_pr9.chat_for("judge") is None or True, "no key means no client, not a cra
 _il9.reload(_pr9)
 
 
+print("\n--- ideation seeds from niches only ---")
+# The first live run seeded from "now" (NOW TV) and "pet desk" (PetDesk):
+# brands were never excluded, so the model was asked for queries adjacent to
+# two app names. Nought for forty.
+from src.report.render import Candidate as _Ci, group_into_clusters as _gci
+from src.llm.judge import Verdict as _Vi
+
+def _ci(term, apps, verdict=None, nm=0.1):
+    return _Ci(term=term, storefront="us", score=45.0, notes=[], factors={},
+               apps=apps, suggest_pos=1,
+               features={"top1_name_match": nm, "in_metadata_share": 0.6,
+                         "stale_share": 0.5, "top1_relevance": 0.4,
+                         "top1_reviews": 20000, "coherence": 1.0},
+               verdict=verdict)
+
+_brandV2 = _Vi("brand", "navigational", "unclear", "NOW TV", 0.99, "")
+_nicheV2 = _Vi("niche", "transactional", "unclear", "Шумомер", 0.95, "")
+_cands = [_ci("now", habit, _brandV2, nm=1.0), _ci("noise meter", noise, _nicheV2)]
+_cls = _gci(_cands)
+_usable = [c for c in _cls if not c.is_brand and not c.is_junk]
+check([c.head.term for c in _usable] == ["noise meter"],
+      f"brands are excluded from seeding: {[c.head.term for c in _usable]}")
+
+# And the same niche across storefronts must seed once, not four times.
+_multi = [_ci("noise meter", noise, _nicheV2) for _ in range(3)]
+for i, c in enumerate(_multi):
+    c.storefront = ["us", "gb", "ca"][i]
+_terms = {c.head.term for c in _gci(_multi)}
+check(len(_terms) == 1, f"one seed per term, not one per storefront: {_terms}")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
