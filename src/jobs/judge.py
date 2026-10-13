@@ -22,6 +22,7 @@ from collections import Counter
 from .. import db
 from ..llm.judge import ensure_table, judge_one, save_verdict
 from ..llm.provider import GroqChat
+from ..pipeline.features import name_match
 from ..report.render import group_into_clusters, load_queue
 
 log = logging.getLogger(__name__)
@@ -65,22 +66,71 @@ def run(limit: int, requeue: bool = False) -> dict[str, int]:
             v = judge_one(
                 chat, c.term, c.storefront, c.apps,
                 [x.term for x in cl.variants],
+                name_match=c.features.get("top1_name_match"),
             )
             if v is None:
                 stats["failed"] += 1
-                # A rate limit returns None for everything after it; stopping
-                # avoids burning the rest of the batch on certain failures.
+                # The provider already retried and tried smaller models. If it
+                # reports exhaustion there is nothing left to wait for, and
+                # three more doomed calls only confirm it.
+                if getattr(chat, "rate_limited", False):
+                    log.warning("rate limit exhausted on every available model "
+                                "— stopping. Already-judged verdicts are saved; "
+                                "run again later to continue.")
+                    break
                 if chat.stats["failures"] >= 3:
                     log.warning("three failures in a row — stopping this run")
                     break
                 continue
             save_verdict(conn, c.term, c.storefront, v, db.now_iso())
             stats[v.category] += 1
-            log.info("  %-28s %-10s %-14s %s",
-                     c.term[:28], v.category, v.monetization, v.niche_name)
+            log.info("  %-26s %-10s %.0f%%  %s",
+                     c.term[:26], v.category, v.confidence * 100, v.niche_name)
+            if v.note:
+                log.info("  %-26s   %s", "", v.note[:90])
 
     stats["calls"] = chat.stats["calls"]
+    if chat.stats.get("downgrades"):
+        stats["model_downgrades"] = chat.stats["downgrades"]
     return dict(stats)
+
+
+def selftest() -> int:
+    """
+    Score the judge against cases whose answer is already known.
+
+    Exists because a run of twelve identical verdicts is unreadable: it could
+    mean the sample was twelve niches, or it could mean the model answers
+    "niche" to everything. Only a labelled set separates the two.
+    """
+    from ..llm.selftest import CASES, case_apps, summarize  # noqa: PLC0415
+
+    chat = GroqChat()
+    if not chat.configured:
+        print("GROQ_API_KEY не задан")
+        return 1
+    model = chat.resolve_model()
+    if not model:
+        print("нет доступной модели")
+        return 1
+
+    print(f"проверка на {len(CASES)} размеченных случаях, модель {model}\n")
+    results: list[tuple[str, str, str]] = []
+
+    for term, expected, title, seller, rating, reviews in CASES:
+        apps = case_apps(title, seller, rating, reviews)
+        nm = name_match(term, title)
+        v = judge_one(chat, term, "us", apps, [], name_match=nm)
+        got = v.category if v else "ошибка"
+        results.append((term, expected, got))
+        mark = "ok" if got == expected else "MISS"
+        print(f"  [{mark:>4}] {term:24} ожидалось {expected:10} получено {got}")
+        if getattr(chat, "rate_limited", False):
+            print("\n  лимит исчерпан — результат неполный")
+            break
+
+    print(summarize(results))
+    return 0
 
 
 def main() -> int:
@@ -91,6 +141,8 @@ def main() -> int:
                     help="re-judge keywords that already have a verdict")
     ap.add_argument("--models", action="store_true",
                     help="list models this API key can call")
+    ap.add_argument("--selftest", action="store_true",
+                    help="judge a labelled set of known cases and score it")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
@@ -110,6 +162,9 @@ def main() -> int:
             print(f"  {m}")
         print(f"\nбудет использована: {chat.resolve_model()}")
         return 0
+
+    if args.selftest:
+        return selftest()
 
     stats = run(args.limit, args.requeue)
     if not stats:

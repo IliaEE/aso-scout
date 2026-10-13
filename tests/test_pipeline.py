@@ -575,12 +575,12 @@ print("\n--- LLM judge: output is data, never instruction ---")
 from src.llm.judge import SYSTEM as _SYS, build_prompt as _bp, parse_verdict as _pv
 
 for _raw, _want, _label in [
-    ('{"category":"brand","intent":"navigational","monetization":"subscription",'
+    ('{"category":"brand","intent":"navigational",'
      '"niche_name":"X","confidence":0.9,"note":"n"}', "brand", "clean JSON"),
-    ('```json\n{"category":"niche","intent":"transactional","monetization":"ads",'
+    ('```json\n{"category":"niche","intent":"transactional",'
      '"niche_name":"Y","confidence":0.7,"note":"n"}\n```', "niche", "fenced"),
     ('<think>reasoning</think>{"category":"too_broad","intent":"informational",'
-     '"monetization":"unclear","niche_name":"Z","confidence":0.4,"note":"n"}',
+     '"niche_name":"Z","confidence":0.4,"note":"n"}',
      "too_broad", "with reasoning block"),
 ]:
     _v = _pv(_raw, "fb")
@@ -614,8 +614,26 @@ _brandv = _V("brand", "navigational", "one_time", "Переименовать", 
 _broadv = _V("too_broad", "informational", "unclear", "Разное", 0.5, "слишком общо")
 _nichev = _V("niche", "transactional", "subscription", "Шумомер", 0.9, "ок")
 
-_g = _g4([_c4("rename", noise, _brandv)])[0]
-check(_g.is_brand, "an LLM brand verdict overrides a heuristic that scored only 0.1")
+# "live 360" is the case the model gets and string matching does not: the
+# spelling differs enough that similarity lands near zero.
+_g = _g4([_c4("live 360", noise, _brandv)])[0]
+check(_g.is_brand, "the model catches a brand the string comparison missed")
+
+# The reverse: the string comparison caught "smarter player lite" at 97 while
+# the model called it a niche. An override would have discarded a correct
+# detection, so the two signals are combined instead.
+_nichev2 = _V("niche", "transactional", "unclear", "Плеер", 0.9, "")
+_caught_by_name = _C4(term="smarter player lite", storefront="us", score=45.0,
+                      notes=[], factors={}, apps=noise, suggest_pos=1,
+                      features={"top1_name_match": 0.97}, verdict=_nichev2)
+check(_g4([_caught_by_name])[0].is_brand,
+      "a brand caught by name similarity is not waved through by the model")
+
+_clean = _C4(term="compress image", storefront="us", score=45.0, notes=[],
+             factors={}, apps=noise, suggest_pos=1,
+             features={"top1_name_match": 0.25}, verdict=_nichev2)
+check(not _g4([_clean])[0].is_brand,
+      "a real niche is flagged by neither detector")
 _g = _g4([_c4("split", habit, _broadv)])[0]
 check(_g.is_junk, "a too_broad verdict routes the entry out of the main list")
 _g = _g4([_c4("noise meter", noise, _nichev)])[0]
@@ -623,6 +641,118 @@ check(not _g.is_brand and not _g.is_junk, "a niche verdict leaves it in place")
 check(_g.display_name == "Шумомер", f"the niche name is used for display: {_g.display_name}")
 check(_g4([_c4("noise meter", noise)])[0].display_name == "noise meter",
       "without a verdict the keyword is shown as-is")
+
+
+print("\n--- judge prompt carries the evidence it asks about ---")
+from src.llm.judge import build_prompt as _bp2, SYSTEM as _S2
+
+_apps2 = [
+    {"title": "Free Tool", "seller": "A", "rating": 4.7, "rating_count": 22460, "price": 0.0},
+    {"title": "Paid Tool", "seller": "B", "rating": 4.7, "rating_count": 29773, "price": 1.99},
+]
+_p2 = _bp2("compress image", "us", _apps2, [])
+check("paid $1.99 upfront" in _p2, "upfront prices reach the model")
+check("free to download" in _p2, "free apps are labelled as such")
+check("1 charge upfront" in _p2, "the prompt summarises how many are paid")
+# The prompt is wrapped, so collapse whitespace before matching.
+_S2flat = " ".join(_S2.split())
+check("monetization" not in _S2flat.lower(),
+      "monetization is no longer asked of the model: it answered 'unclear' for "
+      "12 of 12 niches, having no in-app-purchase data to reason from")
+check("Name similarity" in _bp2("x", "us", _apps2, [], name_match=1.0),
+      "the name-similarity score we already compute is handed to the model")
+check("Name similarity" not in _bp2("x", "us", _apps2, []),
+      "and omitted when it was not computed")
+check("string comparison, not knowledge" in _S2flat,
+      "the model is told the similarity score is evidence, not proof")
+
+
+print("\n--- report hides non-answers ---")
+from src.llm.judge import SYSTEM as _S3, Verdict as _V3
+from src.report.render import render_clusters_table as _rct, Candidate as _C5
+
+_S3flat = " ".join(_S3.split())
+check("leave it EMPTY" in _S3flat,
+      "the model is told to skip notes on obvious calls")
+check("restates the query in other words is worse than no note" in _S3flat,
+      "and told explicitly that restating the query is not a note")
+
+def _c5(term, apps, v):
+    return _C5(term=term, storefront="us", score=45.0, notes=[], factors={},
+               apps=apps, suggest_pos=1, features={"top1_name_match": 0.1},
+               verdict=v)
+
+_unclear = _V3("niche", "transactional", "unclear", "Сжатие", 0.9, "")
+_sub = _V3("niche", "transactional", "subscription", "Сжатие", 0.9, "")  # legacy row
+_out_unclear = _rct([_c5("compress image", noise, _unclear)])
+_out_sub = _rct([_c5("compress image", noise, _sub)])
+check("монетизация неясна" not in _out_unclear,
+      "an 'unclear' verdict prints nothing rather than a row of noise")
+check("подписка" in _out_sub,
+      "a committed verdict is shown")
+
+
+print("\n--- rate limits degrade, not derail ---")
+import os as _os5
+from src.llm.provider import GroqChat as _GC, NON_CHAT as _NC
+
+_os5.environ["GROQ_API_KEY"] = "test"
+_account = ["allam-2-7b", "canopylabs/orpheus-v1-english",
+            "meta-llama/llama-prompt-guard-2-22m", "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b",
+            "qwen/qwen3.8-27b", "whisper-large-v3"]
+
+_c = _GC()
+_c.available_models = lambda: _account
+check(_c.resolve_model() == "openai/gpt-oss-120b",
+      f"picks the strongest available model: {_c._model}")
+
+_chain = [_c._model]
+while _c._downgrade():
+    _chain.append(_c._model)
+check(len(_chain) >= 3, f"rate limiting walks down the list: {' -> '.join(_chain)}")
+check("qwen/qwen3.8-27b" in _chain,
+      "a model absent from the hard-coded preference list is still reachable")
+check(not any(any(x in m for x in _NC) for m in _chain),
+      "audio, guard and embedding models are never selected for judging")
+check(len(_chain) == len(set(_chain)), "no model is tried twice")
+
+_c2 = _GC(model="openai/gpt-oss-20b")
+_c2.available_models = lambda: _account
+check(_c2._downgrade() is False,
+      "an explicitly pinned model is respected and never swapped out")
+
+# Pacing: free tiers cap requests per minute, not just tokens.
+_os5.environ["GROQ_RPM"] = "12"
+check(abs(_GC()._min_interval - 5.0) < 0.01,
+      "GROQ_RPM sets the gap between calls")
+_os5.environ.pop("GROQ_RPM", None)
+_os5.environ.pop("GROQ_API_KEY", None)
+
+
+print("\n--- self-test can detect a rubber-stamping judge ---")
+from src.llm.selftest import CASES as _CASES, summarize as _summ, case_apps as _ca
+
+_counts = {}
+for _c in _CASES:
+    _counts[_c[1]] = _counts.get(_c[1], 0) + 1
+check(len(_counts) >= 3, f"the set covers every class: {_counts}")
+check(_counts.get("niche", 0) < len(_CASES) / 2,
+      "niches are a minority, so answering 'niche' to everything cannot pass")
+
+_allniche = _summ([(q, e, "niche") for q, e, *_ in _CASES])
+check("не превосходит слепое угадывание" in _allniche,
+      "a judge that answers 'niche' to everything is called out")
+
+_perfect = _summ([(q, e, e) for q, e, *_ in _CASES])
+check("слой оправдан" in _perfect, "a correct judge is reported as useful")
+
+_half = [(q, e, e if i % 2 else "niche") for i, (q, e, *_) in enumerate(_CASES)]
+check("Частичная польза" in _summ(_half), "partial accuracy is reported as partial")
+
+_apps = _ca("Life360: Family Safety & GPS", "Life360", 4.8, 3_058_000)
+check(len(_apps) == 3 and _apps[0]["rating_count"] == 3_058_000,
+      "cases build a SERP shaped like a real one")
 
 
 total = len(results)

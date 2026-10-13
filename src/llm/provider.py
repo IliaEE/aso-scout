@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -35,14 +36,42 @@ GROQ_BASE = "https://api.groq.com/openai/v1"
 PREFERRED_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
     "qwen/qwen3-32b",
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
 ]
 
+# Never used for judging, whatever the account offers: audio, safety filters
+# and embeddings are not chat models.
+NON_CHAT = ("whisper", "tts", "orpheus", "guard", "embed", "safeguard")
+
 
 class Chat(Protocol):
+    def _downgrade(self) -> bool:
+        """Move to the next preferred model after persistent rate limiting."""
+        if self._pinned or not self._model:
+            return False
+        available = [m for m in self.available_models()
+                     if not any(x in m for x in NON_CHAT)]
+        self._tried.add(self._model)
+
+        # Preferred order first, then anything else the account has. A model
+        # name missing from the list must not dead-end the run: this account
+        # offers qwen3.8-27b, which no fixed list of mine predicted.
+        ordered = [m for m in PREFERRED_MODELS if m in available]
+        ordered += [m for m in sorted(available) if m not in ordered]
+
+        for candidate in ordered:
+            if candidate not in self._tried:
+                log.warning("rate limited on %s — switching to %s",
+                            self._model, candidate)
+                self._model = candidate
+                self.stats["downgrades"] += 1
+                return True
+        return False
+
     def complete(self, system: str, user: str, max_tokens: int = 700) -> str | None: ...
 
 
@@ -96,7 +125,17 @@ class GroqChat:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._model = model or os.environ.get("GROQ_MODEL") or None
-        self.stats = {"calls": 0, "failures": 0}
+        self._pinned = bool(model or os.environ.get("GROQ_MODEL"))
+        self.stats = {"calls": 0, "failures": 0, "downgrades": 0}
+        self.rate_limited = False
+        self._retried_429 = False
+        self._tried: set[str] = set()
+        self._last_call = 0.0
+        try:
+            rpm = float(os.environ.get("GROQ_RPM", 20))
+        except ValueError:
+            rpm = 20.0
+        self._min_interval = 60.0 / rpm if rpm > 0 else 0.0
 
     @property
     def configured(self) -> bool:
@@ -132,20 +171,44 @@ class GroqChat:
                 self._model = candidate
                 log.info("using Groq model %s", candidate)
                 return candidate
-        # Nothing preferred: take any non-audio, non-guard chat model.
+        # Nothing preferred: take any chat model the account offers. Groq's
+        # catalogue changes names often enough that a fixed list goes stale.
         for m in sorted(available):
-            if not any(x in m for x in ("whisper", "tts", "guard", "embed")):
+            if not any(x in m for x in NON_CHAT):
                 self._model = m
                 log.info("falling back to Groq model %s", m)
                 return m
         return None
+
+    def _downgrade(self) -> bool:
+        """Move to the next preferred model after persistent rate limiting."""
+        if self._pinned or not self._model:
+            return False
+        available = [m for m in self.available_models()
+                     if not any(x in m for x in NON_CHAT)]
+        self._tried.add(self._model)
+
+        # Preferred order first, then anything else the account has. A model
+        # name missing from the list must not dead-end the run: this account
+        # offers qwen3.8-27b, which no fixed list of mine predicted.
+        ordered = [m for m in PREFERRED_MODELS if m in available]
+        ordered += [m for m in sorted(available) if m not in ordered]
+
+        for candidate in ordered:
+            if candidate not in self._tried:
+                log.warning("rate limited on %s — switching to %s",
+                            self._model, candidate)
+                self._model = candidate
+                self.stats["downgrades"] += 1
+                return True
+        return False
 
     def complete(self, system: str, user: str, max_tokens: int = 700) -> str | None:
         model = self.resolve_model()
         if not model or not self.configured:
             return None
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
@@ -158,7 +221,21 @@ class GroqChat:
             "response_format": {"type": "json_object"},
         }
 
+        # Reasoning models burn output tokens on internal thinking, and those
+        # count against the free tier's per-minute budget. Classifying a search
+        # query needs none of it: the first run hit the limit after seven calls.
+        if "gpt-oss" in model or "qwen3" in model:
+            payload["reasoning_effort"] = "low"
+
+        # Space the calls out. Free tiers cap requests per minute as well as
+        # tokens, and arriving in a burst wastes the budget on 429s.
+        if self._min_interval > 0:
+            wait = self._last_call + self._min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+
         self.stats["calls"] += 1
+        self._last_call = time.monotonic()
         try:
             with httpx.Client(timeout=self.timeout) as c:
                 r = c.post(
@@ -172,8 +249,40 @@ class GroqChat:
             return None
 
         if r.status_code == 429:
+            # The body names which limit was hit and for how long. Discarding
+            # it, as the first version did, leaves nothing to act on.
+            retry_after = r.headers.get("retry-after")
+            log.warning("groq rate limit: %s", r.text[:300])
+
+            if not self._retried_429:
+                self._retried_429 = True
+                try:
+                    delay = float(retry_after) if retry_after else 20.0
+                except ValueError:
+                    delay = 20.0
+                delay = min(delay, 60.0)
+                log.info("waiting %.0fs and retrying once", delay)
+                time.sleep(delay)
+                self._last_call = time.monotonic()
+                try:
+                    with httpx.Client(timeout=self.timeout) as c:
+                        r2 = c.post(f"{self.base_url}/chat/completions",
+                                    headers=self._headers(), json=payload)
+                    if r2.status_code == 200:
+                        self._retried_429 = False
+                        return r2.json()["choices"][0]["message"]["content"]
+                except Exception:
+                    log.exception("retry after rate limit failed")
+
+            # Still limited. Drop to the next, smaller model rather than
+            # abandoning the run: a lighter model judging the queue beats the
+            # best model judging seven rows of it.
+            if self._downgrade():
+                self._retried_429 = False
+                return self.complete(system, user, max_tokens)
+
             self.stats["failures"] += 1
-            log.warning("groq rate limit hit — judging stops for this run")
+            self.rate_limited = True
             return None
         if r.status_code != 200:
             self.stats["failures"] += 1

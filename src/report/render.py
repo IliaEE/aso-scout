@@ -73,13 +73,31 @@ class ClusterCandidate:
         e-signature. It just cannot be won on that phrasing, so it belongs in
         its own list rather than competing with genuine niches.
 
-        An LLM verdict overrides the heuristic in both directions — it catches
-        "rename" -> Remini, which fuzzy matching scores at 50 and lets past.
+        Either detector is enough, because they fail in different places.
+        Measured on a labelled set of twenty cases, the model alone scored
+        17/20 and the two combined scored 18/20:
+
+          * name matching caught "smarter player lite" (similarity 97) and
+            "saver" -> Savers, both of which the model called niches;
+          * the model caught "live 360" -> Life360 and "translate now", where
+            the spelling gap or the generic wording left similarity low.
+
+        An earlier version let the model's verdict override the heuristic, so
+        a brand the string comparison had already caught was waved through on
+        the model's say-so. Combining them costs almost nothing when one is
+        wrong: a misrouted entry still appears, just under brand leads. That
+        is why this is an OR and not a gate — "split" lands in brand leads
+        rather than the broad-term list, and nothing is lost by it.
+
+        An earlier version let the model's verdict override the heuristic, so
+        a brand the string comparison had already caught was waved through on
+        the model's say-so. Combining them costs almost nothing when one is
+        wrong: a misrouted entry still appears, just under brand leads.
         """
+        by_name = float(self.head.features.get("top1_name_match") or 0.0) >= BRAND_SUSPECT
         v = self.head.verdict
-        if v is not None:
-            return bool(getattr(v, "is_brand", False))
-        return float(self.head.features.get("top1_name_match") or 0.0) >= BRAND_SUSPECT
+        by_model = bool(getattr(v, "is_brand", False)) if v is not None else False
+        return by_name or by_model
 
     @property
     def is_junk(self) -> bool:
@@ -490,9 +508,11 @@ def render_clusters_table(
         v = c.verdict
         meta = list(r.flags)
         if v is not None:
+            # "unclear" is the honest answer most of the time — the API
+            # exposes no in-app purchase data — but printing it on every row
+            # is noise. Show monetization only when the model committed.
             mon = {"subscription": "подписка", "one_time": "разовая покупка",
-                   "ads": "реклама", "unclear": "монетизация неясна"}.get(
-                       getattr(v, "monetization", ""), "")
+                   "ads": "реклама"}.get(getattr(v, "monetization", ""), "")
             if mon:
                 meta.append(mon)
             if getattr(v, "intent", "") == "informational":

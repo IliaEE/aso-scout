@@ -54,11 +54,22 @@ Answer with a single JSON object and nothing else:
 {
   "category": "niche" | "brand" | "too_broad" | "junk",
   "intent": "transactional" | "navigational" | "informational",
-  "monetization": "subscription" | "one_time" | "ads" | "unclear",
   "niche_name": "<short Russian label, 2-4 words>",
   "confidence": 0.0-1.0,
-  "note": "<one short Russian sentence explaining the call>"
+  "note": "<Russian, see below>"
 }
+
+For "note": leave it EMPTY ("") when the category is "niche" and the call is
+obvious. Only write a note when the verdict is surprising or the category is
+not "niche" — name the specific app or the specific ambiguity. A note that
+merely restates the query in other words is worse than no note.
+
+You are also given a name-similarity score: how closely the query matches the
+#1 app's own name, from 0 to 100. High similarity is strong evidence of a
+brand query — people typing it want that specific app. Weigh it, but it is a
+string comparison, not knowledge: a generic phrase can legitimately be an app's
+name ("Counter Tally Count"), and a brand can score low when the spelling
+differs ("rename" is the app Remini).
 
 Definitions:
 - "brand": the query is the name (or a misspelling) of a specific app or
@@ -68,9 +79,6 @@ Definitions:
   results are a grab bag ("split", "sync", "counter").
 - "junk": not a plausible app-store need at all.
 - "niche": a real functional need with several apps competing to serve it.
-
-For "monetization", judge how apps in this category normally earn: a
-subscription, a one-time purchase, advertising, or unclear.
 
 Be strict. Most queries that merely look specific are brands or too broad."""
 
@@ -156,18 +164,40 @@ def save_verdict(
 
 
 def build_prompt(
-    term: str, storefront: str, apps: list[dict[str, Any]], variants: list[str]
+    term: str,
+    storefront: str,
+    apps: list[dict[str, Any]],
+    variants: list[str],
+    name_match: float | None = None,
 ) -> str:
     lines = [f'Query: "{term}"', f"Storefront: {storefront.upper()}", "", "Apple returns:"]
+    paid = 0
     for i, a in enumerate(apps[:6], start=1):
         # Titles are third-party text. They are described, never obeyed.
         title = str(a.get("title", "?"))[:70].replace("\n", " ")
         seller = str(a.get("seller", "?"))[:40].replace("\n", " ")
+        price = a.get("price")
+        if price and price > 0:
+            paid += 1
+            price_s = f"paid ${price:.2f} upfront"
+        else:
+            price_s = "free to download"
         lines.append(
             f'  {i}. "{title}" by {seller} — '
             f'{a.get("rating") or 0:.1f} stars, '
-            f'{a.get("rating_count") or 0} ratings'
+            f'{a.get("rating_count") or 0} ratings, {price_s}'
         )
+
+    total = len(apps[:6])
+    lines.append("")
+    lines.append(f"Of the top {total}, {paid} charge upfront.")
+    if name_match is not None:
+        # We already compute this; not telling the model wasted it. The first
+        # full run called "translate now" a niche while its #1 result was the
+        # app "Translate Now".
+        lines.append(f"Name similarity between the query and result #1: "
+                     f"{name_match * 100:.0f}/100.")
+
     if variants:
         lines.append("")
         lines.append("Other queries with the same results: "
@@ -192,11 +222,10 @@ def parse_verdict(raw: str | None, fallback_name: str, model: str = "") -> Verdi
     # matched its way to a plausible-looking word — and its classification
     # deserves no more trust than the fields it skipped. Invalid values still
     # fall back to defaults below; absent ones do not.
-    if not all(k in data for k in ("intent", "monetization", "confidence")):
+    if not all(k in data for k in ("intent", "confidence")):
         return None
 
     intent = str(data.get("intent", "")).strip().lower()
-    monetization = str(data.get("monetization", "")).strip().lower()
     try:
         confidence = max(0.0, min(float(data.get("confidence", 0.5)), 1.0))
     except (TypeError, ValueError):
@@ -208,7 +237,10 @@ def parse_verdict(raw: str | None, fallback_name: str, model: str = "") -> Verdi
     return Verdict(
         category=category,
         intent=intent if intent in INTENTS else "transactional",
-        monetization=monetization if monetization in MONETIZATION else "unclear",
+        # No longer asked of the model: it answered "unclear" for 12 of 12
+        # niches, because Apple exposes no in-app-purchase data for it to
+        # reason from. Kept on the record so stored verdicts still load.
+        monetization="unclear",
         niche_name=name,
         confidence=confidence,
         note=note,
@@ -219,8 +251,11 @@ def parse_verdict(raw: str | None, fallback_name: str, model: str = "") -> Verdi
 def judge_one(
     chat: Chat, term: str, storefront: str,
     apps: list[dict[str, Any]], variants: list[str],
+    name_match: float | None = None,
 ) -> Verdict | None:
-    raw = chat.complete(SYSTEM, build_prompt(term, storefront, apps, variants))
+    raw = chat.complete(
+        SYSTEM, build_prompt(term, storefront, apps, variants, name_match)
+    )
     model = getattr(chat, "_model", "") or ""
     v = parse_verdict(raw, term, model)
     if v is None and raw:
