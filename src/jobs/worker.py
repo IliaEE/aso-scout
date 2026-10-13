@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 STATE_LAST_RUN = "last_collect_slot"
 STATE_LAST_DIGEST = "last_digest_date"
+STATE_LAST_IDEATE = "last_ideate_date"
 
 
 def _get_state(conn, key: str) -> str | None:
@@ -127,7 +128,8 @@ def maybe_judge() -> None:
     """
     import os as _os  # noqa: PLC0415
 
-    if not _os.environ.get("GROQ_API_KEY"):
+    if not (_os.environ.get("JUDGE_API_KEY")
+            or _os.environ.get("GROQ_API_KEY")):
         return
     try:
         from .judge import run as judge_run  # noqa: PLC0415
@@ -136,6 +138,37 @@ def maybe_judge() -> None:
         log.info("judged: %s", stats)
     except Exception:
         log.exception("judging failed; report falls back to heuristics")
+
+
+def maybe_ideate() -> None:
+    """
+    Ask the model for adjacent queries, once a day at most.
+
+    After judging, so proposals are seeded from niches that survived
+    classification rather than from brands. Failures are swallowed: ideation
+    is an extra, and losing a night of it costs nothing.
+    """
+    import os as _os  # noqa: PLC0415
+
+    if not (_os.environ.get("IDEATE_API_KEY")
+            or _os.environ.get("GROQ_API_KEY")):
+        return
+    if _os.environ.get("IDEATE", "1").lower() in {"0", "false", "no"}:
+        return
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    with db.connect() as conn:
+        if _get_state(conn, STATE_LAST_IDEATE) == today:
+            return
+        _set_state(conn, STATE_LAST_IDEATE, today)
+
+    try:
+        from .ideate import run as ideate_run  # noqa: PLC0415
+
+        stats = asyncio.run(ideate_run(int(_os.environ.get("IDEATE_SEEDS", 5))))
+        log.info("ideation: %s", stats)
+    except Exception:
+        log.exception("ideation failed; the queue is unaffected")
 
 
 def maybe_send_digest() -> None:
@@ -194,6 +227,7 @@ def scheduler_loop() -> None:
                     asyncio.run(collect_once())
                     log.info("collection finished")
                     maybe_judge()
+                    maybe_ideate()
                     maybe_send_digest()
                 except Exception:
                     log.exception("collection failed; will retry next slot")

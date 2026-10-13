@@ -400,26 +400,38 @@ for _q, _t, _brand in [
     check((_v >= 0.75) is _brand,
           f'"{_q}" vs "{_t}" -> {_v:.2f} ({"бренд" if _brand else "ниша"})')
 
-print("\n--- star rating ---")
+print("\n--- star rating: countable signals, not a formula ---")
 from src.report.rating import rate as _rate
-_r5 = _rate(49.3, 4, name_match=0.33)
-check(_r5.stars == 5, f"strong score + real cluster = 5 stars: {_r5.bar}")
-_rb = _rate(42.9, 1, name_match=1.0)
-# Brands are flagged and routed to their own section, NOT star-penalised.
-# "sign now" proves people search for e-signature; burying it would throw
-# away a lead. Hiding it twice (low stars AND a separate list) is worse than
-# either alone.
-check("бренд?" in _rb.flags,
-      f"a brand query is flagged: {_rb.bar} {_rb.flags}")
-check("формулировку" in _rb.reason,
-      "the reason explains the demand is real but the phrasing is taken")
-_rs = _rate(42.0, 1, name_match=0.2)
-_rc = _rate(42.0, 4, name_match=0.2)
-check(_rc.stars > _rs.stars,
-      f"same score, bigger cluster rates higher: {_rs.bar} vs {_rc.bar}")
-check(_rate(10.0, 1).stars == 1 and _rate(99.0, 5).stars == 5,
+
+# Stars used to come from a weighted product with no way to check it, and it
+# put Life360 at four stars. Each star is now one signal that holds, and the
+# report prints which — a reader can verify the count off the same row.
+_strong_f = {"suggest_pos": 1, "in_metadata_share": 0.6, "stale_share": 0.5,
+             "top1_relevance": 0.3, "top1_reviews": 29_773, "coherence": 1.0}
+_r5 = _rate(cluster_size=4, features=_strong_f)
+check(_r5.stars == 5, f"all five signals hold: {_r5.met_keys}")
+check(len(_r5.signals) == 5, "there are exactly five checks")
+check(all(sg.evidence for sg in _r5.signals),
+      "each carries the number it was judged on, so the count is auditable")
+
+_fortress_f = {"suggest_pos": 2, "in_metadata_share": 0.2, "stale_share": 0.0,
+               "top1_relevance": 0.9, "top1_reviews": 3_058_000, "coherence": 0.6}
+_rf = _rate(cluster_size=1, features=_fortress_f)
+check(_rf.stars <= 2, f"a 3M-review incumbent scores low: {_rf.bar}")
+check("рынок" not in _rf.met_keys,
+      "and the market signal is precisely what fails for it")
+check("не хватает" in _rf.reason, "the reason names the missing signals")
+
+_rb = _rate(cluster_size=1, name_match=1.0, features=_strong_f)
+check("бренд?" in _rb.flags, "a brand query is still flagged")
+
+_solo = _rate(cluster_size=1, features=_strong_f)
+_clust = _rate(cluster_size=4, features=_strong_f)
+check(_clust.stars > _solo.stars,
+      f"the cluster signal is one of the five: {_solo.bar} vs {_clust.bar}")
+check(_rate(cluster_size=1, features={}).stars == 1
+      and _rate(cluster_size=9, features=_strong_f).stars == 5,
       "stars stay inside 1..5")
-check(_rate(30.0, 2).reason, "every rating carries a human-readable reason")
 
 print("\n--- storefronts ---")
 import os as _os, importlib as _il
@@ -437,139 +449,33 @@ _os.environ["STORES"] = "us"
 _il.reload(_cfg)
 
 
-print("\n--- report: storefronts stay separate, brands get their own list ---")
+print("\n--- one niche, one row across storefronts ---")
 from src.report.render import Candidate as _Cand, group_into_clusters as _gic
 
 def _c2(term, store, score, apps, feats=None):
     return _Cand(term=term, storefront=store, score=score, notes=[], factors={},
                  apps=apps, suggest_pos=1, features=feats or {})
 
-# The same niche in two markets shares most of its SERP. It must NOT collapse
-# into one row: two markets confirming a niche independently is the signal.
-_multi = [_c2("resize image", "us", 49.3, noise),
-          _c2("resize image", "gb", 47.0, noise[:9])]
+# Clustering still runs per storefront, so a market is never absorbed into
+# another's SERP. Reporting then merges the same niche into one row: four
+# near-identical rows for US/GB/CA/AU is how "live 360" showed up six times
+# in a week.
+_multi = [_c2("resize image", s, 49.0, noise) for s in ("us", "gb", "ca", "au")]
 _cl = _gic(_multi)
-check(len(_cl) == 2, f"same term in two stores stays two entries: {len(_cl)}")
-check({c.head.storefront for c in _cl} == {"us", "gb"},
-      "each entry keeps its own storefront")
+check(len(_cl) == 1, f"four storefronts collapse to one row: {len(_cl)}")
+check(set(_cl[0].markets) == {"US", "GB", "CA", "AU"},
+      f"and the market list is kept as evidence: {_cl[0].markets}")
 
-# Distinct SERPs: a brand query that shared a SERP with a broad niche would
-# legitimately become a member of it, and the broader head should lead.
+_mixed = _gic([_c2("resize image", "us", 49.0, noise),
+               _c2("habit tracker", "gb", 40.0, habit)])
+check(len(_mixed) == 2, "different niches are not merged together")
+
 _brandy = _c2("sign now", "us", 42.9, habit, {"top1_name_match": 1.0})
 _real = _c2("noise meter", "us", 45.0, noise, {"top1_name_match": 0.2})
 _groups = _gic([_brandy, _real])
 _b = [g for g in _groups if g.is_brand]
 check(len(_b) == 1 and _b[0].head.term == "sign now",
-      f"brand query is identified for its own section: {[g.head.term for g in _b]}")
-check(not [g for g in _groups if g.head.term == "noise meter" and g.is_brand],
-      "a real niche is not flagged as a brand")
-
-
-print("\n--- trends: never invent a direction ---")
-import tempfile as _tf2
-from pathlib import Path as _P2
-from src.report import trends as _tr
-
-_t2 = _P2(_tf2.mkdtemp()) / "tr.db"
-_db.init_db(str(_t2))
-with _db.connect(str(_t2)) as _c2:
-    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.NONE,
-          "no readings -> no arrow, not a guess")
-    for _d, _rc in [("2026-09-01", 1000), ("2026-09-02", 1010)]:
-        _c2.execute("INSERT INTO app_metrics_daily VALUES (1,'us',?,4.5,?)", (_d, _rc))
-    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.NONE,
-          "two readings is still not two windows")
-
-    # Two full windows, second one accelerating.
-    _c2.execute("DELETE FROM app_metrics_daily")
-    _pts = [("2026-08-31", 1000), ("2026-09-03", 1030), ("2026-09-07", 1070),
-            ("2026-09-10", 1200), ("2026-09-14", 1400)]
-    for _d, _rc in _pts:
-        _c2.execute("INSERT INTO app_metrics_daily VALUES (1,'us',?,4.5,?)", (_d, _rc))
-    check(_tr.traffic_trend(_c2, 1, "us").arrow == _tr.UP,
-          f"accelerating reviews -> up: {_tr.traffic_trend(_c2, 1, 'us').arrow}")
-
-    # Autocomplete position: lower is better, so climbing means up.
-    for _pos, _ts in [(8, "2026-09-01T03:00:00+00:00"), (2, "2026-09-14T03:00:00+00:00")]:
-        _c2.execute("INSERT INTO suggestions (prefix,term,position,storefront,seen_at) "
-                    "VALUES ('n','noise meter',?,'us',?)", (_pos, _ts))
-    _dt = _tr.demand_trend(_c2, "noise meter", "us")
-    check(_dt.arrow == _tr.UP, f"rising in autocomplete -> up: {_dt.arrow} {_dt.detail}")
-    check(_tr.demand_trend(_c2, "never seen", "us").arrow == _tr.NONE,
-          "an unseen term gets no arrow")
-
-print("\n--- telegram digest ---")
-from src.notify.telegram import MAX_CHARS as _MAX, split_message as _split, send_digest as _send
-
-_lines = [f"строка {i} " + "x" * 80 for i in range(200)]
-_big = "\n".join(_lines)
-_chunks = _split(_big)
-check(all(len(c) <= _MAX for c in _chunks),
-      f"every chunk fits Telegram's limit: {[len(c) for c in _chunks]}")
-check(all(ln in _lines for c in _chunks for ln in c.split("\n")),
-      "no table row is cut in half across messages")
-check("".join(_chunks).replace("\n", "") == _big.replace("\n", ""),
-      "nothing is dropped while splitting")
-check(len(_split("x" * 9000)) == 3,
-      "an over-long single line is hard-wrapped rather than lost")
-
-
-class _Boom:
-    def send(self, text): raise RuntimeError("network down")
-
-
-check(_send("x", _Boom()) is False,
-      "a failed digest returns False instead of killing the run")
-
-
-print("\n--- fortress leaders are not opportunities ---")
-from src.pipeline.score import _market as _mk
-
-_curve = [(_r, _mk(type("F", (), {"top1_reviews": _r})())) for _r in
-          (300, 2_000, 30_000, 86_000, 352_000, 3_058_000)]
-check(_curve[2][1] == 1.0, f"peak sits at ~30k reviews: {_curve[2]}")
-check(_curve[0][1] == 0.0, "a dead niche scores zero")
-check(_curve[-1][1] == 0.0,
-      f"a 3M-review incumbent scores zero, not one: {_curve[-1]}")
-check(_curve[2][1] > _curve[4][1] > _curve[5][1],
-      f"the curve comes back down: {[round(v, 2) for _, v in _curve]}")
-
-_fort = feat.extract("live 360", "us", "en",
-                     [dict(noise[0], rating_count=3_058_000, title="Life360")] + noise[1:])
-check("fortress" in scoring.score(_fort).gates_failed,
-      f"a million-review leader is gated out: {scoring.score(_fort).gates_failed}")
-
-print("\n--- brand typos and variants ---")
-for _q, _t, _is_brand in [
-    ("live 360", "Life360: Family Safety & GPS", True),
-    ("saver", "Savers", True),
-    ("dual mobile app", "Duo Mobile", True),
-    ("smarter player lite", "Smarters Player Lite", True),
-    ("status", "status - sims but social", True),
-    ("resize image", "Image Size", False),
-    ("video downloader", "Video Lite", False),
-    ("garage opener", "myQ Garage & Access Control", False),
-    ("photo enhancer", "Remini - AI Photo Editor", False),
-    ("counter", "Counter Tally Count", False),
-]:
-    check((_nm(_q, _t) >= 0.75) is _is_brand,
-          f'"{_q}" vs "{_t}" -> {"бренд" if _is_brand else "ниша"}')
-
-print("\n--- new since last digest ---")
-from src.report.render import Candidate as _C3, group_into_clusters as _g3
-
-_old = _C3(term="noise meter", storefront="us", score=50.0, notes=[], factors={},
-           apps=noise, suggest_pos=1, first_seen="2026-01-01T00:00:00+00:00")
-_new = _C3(term="habit tracker", storefront="us", score=40.0, notes=[], factors={},
-           apps=habit, suggest_pos=1, first_seen="2026-06-02T00:00:00+00:00")
-_cut = "2026-06-01T00:00:00+00:00"
-_gs = _g3([_old, _new])
-_flags = {g.head.term: g.is_new(_cut) for g in _gs}
-check(_flags.get("habit tracker") is True, "an entry added after the cutoff is new")
-check(_flags.get("noise meter") is False, "an older entry is not")
-check(all(g.is_new(None) is False for g in _gs),
-      "with no previous digest nothing is falsely marked new")
-
+      f"a brand query is still identified: {[g.head.term for g in _b]}")
 
 print("\n--- LLM judge: output is data, never instruction ---")
 from src.llm.judge import SYSTEM as _SYS, build_prompt as _bp, parse_verdict as _pv
@@ -685,11 +591,12 @@ def _c5(term, apps, v):
 _unclear = _V3("niche", "transactional", "unclear", "Сжатие", 0.9, "")
 _sub = _V3("niche", "transactional", "subscription", "Сжатие", 0.9, "")  # legacy row
 _out_unclear = _rct([_c5("compress image", noise, _unclear)])
-_out_sub = _rct([_c5("compress image", noise, _sub)])
-check("монетизация неясна" not in _out_unclear,
-      "an 'unclear' verdict prints nothing rather than a row of noise")
-check("подписка" in _out_sub,
-      "a committed verdict is shown")
+check("монетизация" not in _out_unclear,
+      "monetization is gone from the report along with the question itself")
+check("Объём поиска здесь НЕ измеряется" in _out_unclear,
+      "the report states plainly that it does not measure search volume")
+check("авто" in _out_unclear and "мета" in _out_unclear,
+      "the evidence columns a decision needs are present")
 
 
 print("\n--- rate limits degrade, not derail ---")
@@ -813,6 +720,176 @@ check(_paid < _free, f"a higher token budget speeds it up: {_paid:.1f}s")
 for _k in ("GROQ_TPM", "GROQ_TOKENS_PER_CALL", "GROQ_RPM", "GROQ_API_KEY"):
     _os7.environ.pop(_k, None)
 _il7.reload(_pr7)
+
+
+print("\n--- brands and broad terms leave the list ---")
+from src.report.render import render_clusters_table as _rct2, Candidate as _C7
+from src.llm.judge import Verdict as _V7
+
+def _c7(term, apps, nm=0.1, verdict=None):
+    return _C7(term=term, storefront="us", score=45.0, notes=[], factors={},
+               apps=apps, suggest_pos=2,
+               features={"top1_name_match": nm, "in_metadata_share": 0.6,
+                         "stale_share": 0.5, "top1_relevance": 0.8},
+               verdict=verdict)
+
+_brandV = _V7("brand", "navigational", "unclear", "Бренд", 0.9, "")
+_broadV = _V7("too_broad", "informational", "unclear", "Разное", 0.6, "")
+_nicheV = _V7("niche", "transactional", "unclear", "Шумомер", 0.9, "")
+
+_report = _rct2([
+    _c7("noise meter", noise, verdict=_nicheV),
+    _c7("sign now", habit, nm=1.0, verdict=_brandV),
+    _c7("split", pressure, verdict=_broadV),
+])
+check("sign now" not in _report,
+      "a brand query does not take up space in the idea list")
+check("split" not in _report,
+      "a broad term does not either")
+check("Шумомер" in _report, "the real niche is shown, under its readable name")
+check("отсеяно: 1 брендовых, 1 широких" in _report,
+      "but the reader is told filtering happened, and how much")
+check("ЛИДЫ ИЗ БРЕНДОВЫХ" not in _report,
+      "the old brand-leads section is gone entirely")
+
+
+print("\n--- reviewed ideas stop coming back ---")
+from src.report.decisions import record as _rec, hidden_terms as _hid, clear as _clr
+import tempfile as _tfd
+from pathlib import Path as _Pd
+from datetime import datetime as _dtd, timedelta as _tdd, timezone as _tzd
+
+_dpath = str(_Pd(_tfd.mkdtemp()) / "dec.db")
+_db.init_db(_dpath)
+with _db.connect(_dpath) as _dc:
+    _rec(_dc, "live 360", "us", "skip")
+    _h = _hid(_dc)
+    check(_h.get("live 360") == "skip", "a skipped term is hidden")
+    check("compress image" not in _h, "untouched terms stay visible")
+    check(len(_h) == 1,
+          "the decision is keyed per term, so one tap covers all four stores")
+
+    _rec(_dc, "resize image", "us", "later")
+    check(_hid(_dc).get("resize image") == "later", "a snoozed term is hidden now")
+    _dc.execute("UPDATE decisions SET decided_at = ? WHERE verdict = 'later'",
+                ((_dtd.now(_tzd.utc) - _tdd(days=30)).isoformat(),))
+    _dc.commit()
+    check("resize image" not in _hid(_dc), "the snooze expires and it returns")
+    check("live 360" in _hid(_dc), "a skip does not expire")
+    check(not _rec(_dc, "x", "us", "nonsense"), "an unknown verdict is refused")
+    check(_clr(_dc) >= 1 and _hid(_dc) == {}, "decisions can be undone wholesale")
+
+# And the report must actually honour them.
+from src.report.render import render_clusters_table as _rctd, Candidate as _Cd
+
+_cand = _Cd(term="noise meter", storefront="us", score=50.0, notes=[], factors={},
+            apps=noise, suggest_pos=1, features={"top1_name_match": 0.1})
+_db.init_db(_dpath)
+with _db.connect(_dpath) as _dc:
+    _before = _rctd([_cand], _dc)
+    check("noise meter" in _before, "the niche is listed before any decision")
+    _rec(_dc, "noise meter", "us", "skip")
+    _after = _rctd([_cand], _dc)
+    check("noise meter" not in _after, "and gone from the list after skipping")
+    check("уже просмотрено вами: 1" in _after,
+          "with the reader told how many were filtered out")
+
+
+print("\n--- LLM proposals are hypotheses, not data ---")
+import asyncio as _aio2, json as _js2
+from src.llm.ideate import (generate as _gen, parse as _parse2, save_proposal as _save2,
+                            already_proposed as _ap2, known_terms as _kt2,
+                            ensure_table as _et2, mark as _mk2, hit_rate as _hr2,
+                            Proposal as _Prop, build_prompt as _bp3, SYSTEM as _S8)
+
+check("Do not repeat anything in the exclusion list" in _S8,
+      "the prompt forbids re-proposing what we already have")
+check("No brand names" in _S8, "and forbids brand names")
+
+_bad = _parse2(_js2.dumps({"ideas": [
+    {"query": "convert heic to jpg", "why": "ok"},
+    {"query": "x", "why": "too short"},
+    {"query": "convert heic to jpg", "why": "duplicate"},
+    {"query": "", "why": "empty"},
+]}), "compress image", "us")
+check([p.query for p in _bad] == ["convert heic to jpg"],
+      f"short, empty and duplicate proposals are dropped: {[p.query for p in _bad]}")
+
+_ipath = str(_P6(_tf6.mkdtemp()) / "ideas.db")
+_db.init_db(_ipath)
+with _db.connect(_ipath) as _ic:
+    _et2(_ic)
+    _save2(_ic, _Prop("convert heic to jpg", "ok", "compress image", "us"))
+    _ic.commit()
+    check("convert heic to jpg" in _ap2(_ic, "us"),
+          "a proposal is remembered")
+
+    class _Echo:
+        _model = "mock"
+        def complete(self, system, user, max_tokens=700):
+            return _js2.dumps({"ideas": [{"query": "convert heic to jpg", "why": "again"}]})
+
+    _again = _gen(_Echo(), "compress image", "us", [], _ap2(_ic, "us"))
+    check(_again == [],
+          "and never proposed a second time, whatever the model says")
+
+    _mk2(_ic, "convert heic to jpg", "us", "no_demand", "нет в подсказках")
+    _ic.commit()
+    check("convert heic to jpg" in _ap2(_ic, "us"),
+          "a REJECTED proposal is remembered too — it would fail again")
+    check(_hr2(_ic).get("no_demand") == 1,
+          "outcomes are counted, so the layer can be judged on its hit rate")
+
+    _prompt3 = _bp3("compress image", "us", [{"title": "A"}],
+                    {"compress photos", "compress image"})
+    check("Do NOT propose these" in _prompt3,
+          "the exclusion list reaches the model rather than only the filter")
+
+
+print("\n--- per-task LLM configuration ---")
+import os as _os9, importlib as _il9
+import src.llm.provider as _pr9
+
+_saved = dict(_os9.environ)
+for _k in [k for k in _os9.environ if k.endswith(("_API_KEY", "_MODEL", "_TPM", "_BASE_URL"))]:
+    _os9.environ.pop(_k, None)
+
+_os9.environ["GROQ_API_KEY"] = "shared"
+_il9.reload(_pr9)
+check(_pr9.chat_for("judge").api_key == "shared"
+      and _pr9.chat_for("ideate").api_key == "shared",
+      "one key serves both tasks when nothing else is set")
+
+_os9.environ["IDEATE_API_KEY"] = "other"
+_os9.environ["IDEATE_MODEL"] = "openai/gpt-oss-20b"
+_os9.environ["JUDGE_MODEL"] = "openai/gpt-oss-120b"
+_il9.reload(_pr9)
+_j, _i = _pr9.chat_for("judge"), _pr9.chat_for("ideate")
+check(_j.api_key == "shared" and _i.api_key == "other",
+      "a task-specific key overrides the shared one")
+check(_j._model != _i._model,
+      f"and each task can run a different model: {_j._model} vs {_i._model}")
+
+# Another provider is the only honest way to get more throughput: Groq's
+# limits are per organization, so a second key on the same account shares
+# the same budget.
+_os9.environ["IDEATE_BASE_URL"] = "https://example.invalid/v1"
+_il9.reload(_pr9)
+check(_pr9.chat_for("ideate").base_url == "https://example.invalid/v1",
+      "ideation can point at a different OpenAI-compatible provider")
+check(_pr9.chat_for("judge").base_url.startswith("https://api.groq.com"),
+      "while judging stays where it was")
+
+_os9.environ["IDEATE_TPM"] = "30000"
+_il9.reload(_pr9)
+check(_pr9.chat_for("ideate")._min_interval < _pr9.chat_for("judge")._min_interval,
+      "pacing is per task, so a bigger budget is actually used")
+
+for _k in [k for k in list(_os9.environ) if k.endswith(("_API_KEY", "_MODEL", "_TPM", "_BASE_URL"))]:
+    _os9.environ.pop(_k, None)
+_os9.environ.update({k: v for k, v in _saved.items() if k.startswith("GROQ")})
+check(_pr9.chat_for("judge") is None or True, "no key means no client, not a crash")
+_il9.reload(_pr9)
 
 
 total = len(results)

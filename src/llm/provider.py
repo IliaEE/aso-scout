@@ -325,6 +325,48 @@ class GroqChat:
             return None
 
 
+def chat_for(task: str) -> GroqChat | None:
+    """
+    A client configured for one task: "judge" or "ideate".
+
+    Separate configuration per task, because the two jobs have different
+    needs. Judging benefits from the strongest model available; proposing
+    adjacent queries does not, and a smaller model there leaves more of the
+    token budget for the work that needs it.
+
+    One thing a second key does NOT buy: more throughput. Groq's limits are
+    per organization — the 429 body says so outright, "in organization
+    org_..." — so another key on the same account draws from the same 8000
+    tokens a minute. Real extra capacity means either a paid tier or a
+    genuinely different provider.
+
+    Which is why base_url is configurable too: anything OpenAI-compatible
+    works here, so IDEATE_BASE_URL can point at another provider with its own
+    budget.
+
+    Falls back to the shared GROQ_* settings when the task-specific ones are
+    unset, so existing deployments keep working untouched.
+    """
+    prefix = task.upper()
+    key = os.environ.get(f"{prefix}_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return None
+    model = os.environ.get(f"{prefix}_MODEL") or os.environ.get("GROQ_MODEL") or None
+    base = os.environ.get(f"{prefix}_BASE_URL") or os.environ.get("GROQ_BASE_URL") or GROQ_BASE
+    chat = GroqChat(api_key=key, model=model, base_url=base)
+
+    # Per-task pacing: an ideation pass is a handful of calls, a judging pass
+    # is dozens, and they should not have to share one interval.
+    tpm = os.environ.get(f"{prefix}_TPM")
+    if tpm:
+        try:
+            est = float(os.environ.get(f"{prefix}_TOKENS_PER_CALL", 1000))
+            chat._min_interval = 60.0 / max(float(tpm) / max(est, 1), 1)
+        except ValueError:
+            pass
+    return chat
+
+
 def default_chat() -> GroqChat | None:
     chat = GroqChat()
     return chat if chat.configured else None

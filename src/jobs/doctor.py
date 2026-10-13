@@ -91,11 +91,32 @@ async def main() -> int:
             problems += 1
 
     # --- LLM layer -------------------------------------------------------
-    from ..llm.provider import chat_for  # noqa: PLC0415
-
+    # A diagnostic tool must never be the thing that crashes. A partial deploy
+    # once left chat_for missing here and doctor answered with a traceback
+    # instead of saying which file was stale — exactly when a clear answer
+    # mattered most.
     print("\nLLM")
+    try:
+        from ..llm.provider import chat_for  # noqa: PLC0415
+    except ImportError as exc:
+        print(f"  [{BAD}] код устарел: {exc}")
+        print("         задеплоен не весь набор файлов — проверьте, что")
+        print("         src/llm/provider.py обновлён и запушен")
+        problems += 1
+        chat_for = None  # type: ignore[assignment]
+
+    if chat_for is None:
+        print("\n" + "=" * 46)
+        print(f"{problems} blocking problem(s). Fix before collecting.")
+        return 1
+
     for task, label in (("judge", "судья"), ("ideate", "генератор идей")):
-        chat = chat_for(task)
+        try:
+            chat = chat_for(task)
+        except Exception as exc:
+            print(f"  [{BAD}] {label}: {type(exc).__name__}: {exc}")
+            problems += 1
+            continue
         if chat is None:
             print(f"  [{WARN}] {label}: ключ не задан — работают только эвристики")
             continue

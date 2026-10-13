@@ -21,7 +21,7 @@ from collections import Counter
 
 from .. import db
 from ..llm.judge import ensure_table, judge_one, save_verdict
-from ..llm.provider import GroqChat
+from ..llm.provider import GroqChat, chat_for
 from ..pipeline.features import name_match
 from ..report.render import group_into_clusters, load_queue
 
@@ -29,9 +29,9 @@ log = logging.getLogger(__name__)
 
 
 def run(limit: int, requeue: bool = False) -> dict[str, int]:
-    chat = GroqChat()
-    if not chat.configured:
-        log.warning("GROQ_API_KEY not set — skipping judgement")
+    chat = chat_for("judge")
+    if chat is None:
+        log.warning("no API key set — skipping judgement")
         return {}
 
     model = chat.resolve_model()
