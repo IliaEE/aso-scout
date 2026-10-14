@@ -1164,6 +1164,86 @@ check(_raised and _tm9.time() - _t0 < 1.0,
       "a non-lock error is raised immediately, not retried into silence")
 
 
+print("\n--- trends over popularity history ---")
+from src.asa.trends import (movement as _mv, new_entrants as _ne,
+                            sustained as _su, check_seasonality as _cs,
+                            Movement as _Mv, periods as _pd)
+from src.jobs.asa_pull import ensure_schema as _es4, store as _st4
+from datetime import date as _d4, timedelta as _td4
+
+_tpath = str(_P6(_tf6.mkdtemp()) / "trends.db")
+_db.init_db(_tpath)
+_wk = [( _d4(2025, 7, 6) + _td4(days=7 * i)).isoformat() for i in range(66)]
+_rows4 = []
+for _i, _w in enumerate(_wk):
+    _rows4.append(_PR("steady", "us", "BUSINESS", _w, max(400 - _i * 5, 40), 50, 45, 3))
+    _rows4.append(_PR("flat", "us", "BUSINESS", _w, 100, 60, 55, 3))
+    _rows4.append(_PR("sinking", "us", "BUSINESS", _w, min(60 + _i * 6, 495), 40, 35, 2))
+_rows4.append(_PR("brand new", "us", "BUSINESS", _wk[-1], 180, 55, 50, 3))
+with _db.connect(_tpath) as _tc:
+    _es4(_tc)
+    _st4(_tc, _rows4, "WEEKLY_SUN_SAT")
+
+    check(len(_pd(_tc)) == 66, "a year of weeks is readable")
+
+    _entr = _ne(_tc, ["us"])
+    check([m.term for m in _entr] == ["brand new"],
+          f"only the genuinely new term is an entrant: {[m.term for m in _entr]}")
+    check(_entr[0].is_new and _entr[0].rank_now == 180,
+          "and it carries the rank it entered at")
+
+    # A term climbing 5 places a week is invisible week to week and obvious
+    # over a month. That is the whole reason the two reports differ.
+    _week = _mv(_tc, ["us"], lookback_weeks=1, min_delta=30)
+    check("steady" not in [m.term for m in _week],
+          "a slow climber does not show up in the weekly view")
+    _sus = _su(_tc, ["us"], window=4, min_total_gain=15)
+    check("steady" in [m.term for m in _sus],
+          f"but does in the monthly one: {[m.term for m in _sus]}")
+    check("flat" not in [m.term for m in _sus], "a flat term never qualifies")
+    check("sinking" not in [m.term for m in _sus], "nor does a falling one")
+
+    _fall = [m for m in _mv(_tc, ["us"], lookback_weeks=8, min_delta=30)
+             if not m.climbing]
+    check("sinking" in [m.term for m in _fall],
+          "a sinking term is reported as falling — the niche is deflating")
+
+print("\n--- seasonality needs more than a year of history ---")
+_spath = str(_P6(_tf6.mkdtemp()) / "season.db")
+_db.init_db(_spath)
+_yr_idx = len(_wk) - 1 - 52
+_srows = []
+for _i, _w in enumerate(_wk):
+    # Climbs in the four weeks ending now AND in the four ending a year ago.
+    if _i >= len(_wk) - 5:
+        _r = 400 - (_i - (len(_wk) - 5)) * 75
+    elif _yr_idx - 4 <= _i <= _yr_idx:
+        _r = 400 - (_i - (_yr_idx - 4)) * 75
+    else:
+        _r = 400
+    _srows.append(_PR("seasonal", "us", "EDUCATION", _w, max(_r, 50), 60, 55, 3))
+    _r2 = 400 - (_i - (len(_wk) - 5)) * 75 if _i >= len(_wk) - 5 else 400
+    _srows.append(_PR("genuinely new", "us", "BUSINESS", _w, max(_r2, 50), 50, 45, 3))
+with _db.connect(_spath) as _sc:
+    _es4(_sc)
+    _st4(_sc, _srows, "WEEKLY_SUN_SAT")
+    check(_cs(_sc, _Mv("seasonal", "us", "EDUCATION", 100, 400, 55, 300)) is True,
+          "a climb that also happened a year ago is marked seasonal")
+    check(_cs(_sc, _Mv("genuinely new", "us", "BUSINESS", 100, 400, 45, 300)) is False,
+          "a first-time climb is not")
+
+# With exactly twelve months there is nothing to compare against, and saying
+# so beats a confident wrong answer.
+_short = str(_P6(_tf6.mkdtemp()) / "short.db")
+_db.init_db(_short)
+with _db.connect(_short) as _shc:
+    _es4(_shc)
+    _st4(_shc, [_PR("x", "us", "BUSINESS", w, 100, 50, 45, 3) for w in _wk[-52:]],
+         "WEEKLY_SUN_SAT")
+    check(_cs(_shc, _Mv("x", "us", "BUSINESS", 100, 400, 45, 300)) is None,
+          "twelve months of history answers 'unknown', not False")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
