@@ -1256,6 +1256,61 @@ with _db.connect(_short) as _shc:
           "twelve months of history answers 'unknown', not False")
 
 
+print("\n--- measured demand still needs the competition filter ---")
+# The first live trend run surfaced cinnabon, mcdonalds rewards, servus credit
+# union and daves hot chicken as top movers. The popularity numbers were
+# correct; the terms were useless. Movement belongs to brands because brands
+# are what move, so demand data only becomes candidates after the same gates
+# everything else goes through.
+import asyncio as _aio9
+from src.jobs.asa_enrich import (candidates_by_popularity as _cbp,
+                                 enrich as _enr)
+from src.jobs.asa_pull import ensure_schema as _es9, store as _st9
+from src.sources.http import FixtureClient as _FC9
+from src.sources.itunes import SEARCH_URL as _SU9
+
+_epath = str(_P6(_tf6.mkdtemp()) / "enrich.db")
+_db.init_db(_epath)
+with _db.connect(_epath) as _ec:
+    _es9(_ec)
+    _st9(_ec, [
+        _PR("cinnabon", "us", "FOOD_DRINK", "2026-10-04", 19, 80, 71, 4),
+        _PR("noise meter", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 120, 60, 55, 3),
+        _PR("block puzzle", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 50, 75, 66, 4),
+        _PR("quiet thing", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 300, 30, 20, 1),
+    ], "WEEKLY_SUN_SAT")
+    _items = _cbp(_ec, ["us"], 45, 10)
+
+check([t for t, _, _ in _items] == ["cinnabon", "block puzzle", "noise meter"],
+      f"a popularity floor keeps the long tail out: {[t for t, _, _ in _items]}")
+check(all(p >= 45 for _, _, p in _items), "and every candidate clears it")
+
+_client9 = fixtures.build_client()
+
+
+def _k9(term):
+    return _FC9.make_key(_SU9, {"term": term, "country": "us",
+                                "entity": "software", "limit": 10})
+
+
+_client9.fixtures[_k9("cinnabon")] = {"results": [fixtures.app(900, "Cinnabon", 4.8, 52_000, 30)]}
+_client9.fixtures[_k9("noise meter")] = {"results": fixtures.NOISE_METER}
+_client9.fixtures[_k9("block puzzle")] = {"results": fixtures.BLOCK_PUZZLE}
+
+import src.db as _dbmod
+_saved_path = _dbmod.settings.sqlite_path
+_dbmod.settings.sqlite_path = _epath
+try:
+    _st9res = _aio9.run(_enr(_client9, _items))
+finally:
+    _dbmod.settings.sqlite_path = _saved_path
+
+check(_st9res.get("brand") == 1,
+      f"the brand term is caught by name match, not by popularity: {_st9res}")
+check(_st9res.get("rejected") == 1, "the game term is gated out")
+check(_st9res.get("queued") == 1, "and only the real niche survives")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
