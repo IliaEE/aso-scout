@@ -55,6 +55,45 @@ def ensure_schema(conn) -> None:
     conn.executescript(SCHEMA)
 
 
+def already_pulled(conn, granularity: str) -> set[tuple[str, str]]:
+    """
+    (period, genre) pairs already in the database.
+
+    A year of history is ~2800 requests. Without this, an interruption at week
+    forty means starting from week one, and the second attempt is as likely to
+    be interrupted as the first.
+    """
+    ensure_schema(conn)
+    return {
+        (r["period"], r["genre"])
+        for r in conn.execute(
+            "SELECT DISTINCT period, genre FROM asa_popularity WHERE granularity = ?",
+            (granularity,),
+        )
+    }
+
+
+def months_back(n: int) -> list[tuple[str, str]]:
+    """
+    The last n completed calendar months, oldest first.
+
+    Monthly data is the antidote to mistaking seasonality for a trend. A term
+    that climbs every September is a school-year effect, not an emerging
+    niche, and only a year of history can tell the two apart.
+    """
+    today = date.today()
+    first_of_this = today.replace(day=1)
+    out = []
+    for i in range(n, 0, -1):
+        # Walk back i months by repeatedly stepping to the previous month.
+        d = first_of_this
+        for _ in range(i):
+            d = (d - timedelta(days=1)).replace(day=1)
+        nxt = (d + timedelta(days=32)).replace(day=1)
+        out.append((d.isoformat(), (nxt - timedelta(days=1)).isoformat()))
+    return out
+
+
 def weeks_back(n: int) -> list[tuple[str, str]]:
     """The last n completed Sunday-Saturday weeks, oldest first."""
     today = date.today()
@@ -134,6 +173,11 @@ def main() -> int:
                     help="rows per genre; the head is all brands, so go deep")
     ap.add_argument("--adopt", type=int, default=0,
                     help="also queue terms with popularity >= this (0 = skip)")
+    ap.add_argument("--monthly", action="store_true",
+                    help="monthly granularity instead of weekly — steadier, and "
+                         "the only way to separate seasonality from a real trend")
+    ap.add_argument("--force", action="store_true",
+                    help="re-pull periods already stored")
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
 
@@ -169,25 +213,37 @@ def main() -> int:
 
     countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
     genres = GENRES if args.all_genres else PRIORITY_GENRES
+    granularity = "MONTHLY" if args.monthly else "WEEKLY_SUN_SAT"
+    periods = months_back(args.weeks) if args.monthly else weeks_back(args.weeks)
     client = PopularityClient(AsaAuth())
     stats: Counter[str] = Counter()
 
-    log.info("%d genres x %s, %d week(s), depth %d",
-             len(genres), ",".join(countries), args.weeks, args.depth)
-
     with db.connect() as conn:
-        for start, end in weeks_back(args.weeks):
-            for genre in genres:
-                rows = list(client.query(
-                    countries, genre, start, end,
-                    granularity="WEEKLY_SUN_SAT",
-                    page_size=100, max_rows=args.depth,
-                ))
-                saved = store(conn, rows, "WEEKLY_SUN_SAT")
-                stats["rows"] += saved
-                log.info("  %s %-26s %4d rows", start, genre, saved)
-                if not rows:
-                    stats["empty"] += 1
+        done = set() if args.force else already_pulled(conn, granularity)
+        todo = [(p, g) for p in periods for g in genres
+                if (p[0], g) not in done]
+
+        log.info("%d genres x %s, %d period(s), depth %d",
+                 len(genres), ",".join(countries), len(periods), args.depth)
+        if done and not args.force:
+            log.info("already stored: %d period/genre pairs — skipping them",
+                     len(done))
+        log.info("to pull: %d pairs, roughly %d requests",
+                 len(todo), len(todo) * max(args.depth // 100, 1))
+
+        for (start, end), genre in todo:
+            rows = list(client.query(
+                countries, genre, start, end,
+                granularity=granularity,
+                page_size=100, max_rows=args.depth,
+            ))
+            saved = store(conn, rows, granularity)
+            stats["rows"] += saved
+            log.info("  %s %-26s %4d rows", start, genre, saved)
+            if not rows:
+                stats["empty"] += 1
+            # Committed per genre by store(), so an interruption keeps
+            # everything pulled so far.
 
         if args.adopt:
             added = adopt_terms(conn, args.adopt,

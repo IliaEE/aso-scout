@@ -1057,6 +1057,45 @@ check("GAMES" not in _PG, "games are not a priority genre — we do not build ga
 check("PRODUCTIVITY_UTILITIES" in _PG, "utilities are")
 
 
+print("\n--- backfill is resumable ---")
+from src.jobs.asa_pull import (already_pulled as _ap3, months_back as _mb3,
+                               ensure_schema as _es3, store as _st3)
+
+_bpath = str(_P6(_tf6.mkdtemp()) / "backfill.db")
+_db.init_db(_bpath)
+with _db.connect(_bpath) as _bc:
+    _es3(_bc)
+    _st3(_bc, [_PR("x", "us", "BUSINESS", "2026-09-27", 1, 90, 88, 5)],
+         "WEEKLY_SUN_SAT")
+    _st3(_bc, [_PR("z", "us", "BUSINESS", "2026-09-01", 1, 90, 88, 5)], "MONTHLY")
+
+    _dw = _ap3(_bc, "WEEKLY_SUN_SAT")
+    check(("2026-09-27", "BUSINESS") in _dw,
+          "a pulled period/genre pair is remembered")
+    check(("2026-09-27", "FINANCE") not in _dw,
+          "an unpulled genre in the same week is not")
+    check(("2026-09-01", "BUSINESS") not in _dw,
+          "monthly rows do not mask weekly ones")
+    check(("2026-09-01", "BUSINESS") in _ap3(_bc, "MONTHLY"),
+          "and are tracked under their own granularity")
+
+# A year of history is ~2800 requests; an interruption at week forty must not
+# mean starting over.
+_periods = [("2026-09-27", "x"), ("2026-10-04", "x")]
+_genres = ["BUSINESS", "FINANCE"]
+_todo = [(p, g) for p, _ in _periods for g in _genres
+         if (p, g) not in _dw]
+check(len(_todo) == 3, f"resuming skips only what is already stored: {len(_todo)}/4")
+
+_mo = _mb3(13)
+check(len(_mo) == 13, "a year of months can be requested")
+check(all(_m[0].endswith("-01") for _m in _mo), "each starts on the 1st")
+check(_dte.fromisoformat(_mo[-1][1]) < _dte.today().replace(day=1)
+      or _mo[-1][1] < _dte.today().isoformat(),
+      "the newest month is already complete")
+check(_mo[0][0] < _mo[-1][0], "oldest first")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
