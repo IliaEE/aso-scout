@@ -988,6 +988,75 @@ check(_dte.fromisoformat(_e) < _dte.today(),
       "and is already finished, so Apple has had time to publish it")
 
 
+print("\n--- Apple Ads popularity snapshots ---")
+from src.jobs.asa_pull import (ensure_schema as _es2, store as _st2,
+                               adopt_terms as _at2, weeks_back as _wb2)
+from src.asa.popularity import PopularityRow as _PR, PRIORITY_GENRES as _PG
+
+_wk = _wb2(4)
+check(len(_wk) == 4, "four completed weeks are produced")
+check(all(_dte.fromisoformat(a).weekday() == 6 for a, _ in _wk),
+      "each starts on a Sunday")
+check(_wk[0][0] < _wk[-1][0], "oldest first, so a backfill reads chronologically")
+check(_dte.fromisoformat(_wk[-1][1]) < _dte.today(),
+      "even the newest week is already finished")
+
+_apath = str(_P6(_tf6.mkdtemp()) / "asa.db")
+_db.init_db(_apath)
+with _db.connect(_apath) as _ac:
+    _es2(_ac)
+    _w1 = [
+        _PR("chatgpt", "us", "PRODUCTIVITY_UTILITIES", "2026-09-27", 1, 95, 90, 5),
+        _PR("pdf editor", "us", "PRODUCTIVITY_UTILITIES", "2026-09-27", 300, 38, 35, 2),
+        _PR("habit tracker", "us", "HEALTH_FITNESS", "2026-09-27", 88, 60, 55, 3),
+    ]
+    _w2 = [
+        _PR("chatgpt", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 1, 95, 90, 5),
+        _PR("pdf editor", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 95, 61, 58, 3),
+        _PR("habit tracker", "us", "HEALTH_FITNESS", "2026-10-04", 210, 40, 37, 2),
+    ]
+    _st2(_ac, _w1, "WEEKLY_SUN_SAT")
+    _st2(_ac, _w2, "WEEKLY_SUN_SAT")
+    _st2(_ac, _w2, "WEEKLY_SUN_SAT")   # re-pulling the same week must not duplicate
+    _n = _ac.execute("SELECT COUNT(*) c FROM asa_popularity").fetchone()["c"]
+    check(_n == 6, f"re-pulling a week overwrites rather than duplicates: {_n}")
+
+    # The whole reason for keeping weeks: movement, not just size.
+    _moves = {
+        r["term"]: r["old"] - r["new"]
+        for r in _ac.execute("""
+            SELECT a.term, a.rank_in_genre AS old, b.rank_in_genre AS new
+            FROM asa_popularity a JOIN asa_popularity b
+              ON a.term=b.term AND a.country=b.country AND a.genre=b.genre
+            WHERE a.period='2026-09-27' AND b.period='2026-10-04'
+        """)
+    }
+    check(_moves["pdf editor"] > 100,
+          f"a climbing term shows a positive rank delta: {_moves['pdf editor']}")
+    check(_moves["habit tracker"] < -100,
+          f"a falling one shows negative: {_moves['habit tracker']}")
+    check(_moves["chatgpt"] == 0, "a static term shows no movement")
+
+    # Adoption looks at the highest popularity a term ever reached, not its
+    # latest. A term that cleared the bar three weeks ago and has since fallen
+    # is still a real search term worth examining — and the fall is itself
+    # information the report shows as a trend.
+    _added = _at2(_ac, 45, ["us"])
+    check(_added == 3,
+          f"terms that ever cleared the floor are queued: {_added}")
+    check(_at2(_ac, 95, ["us"]) == 0,
+          "a floor above everything queues nothing")
+    _again = _at2(_ac, 45, ["us"])
+    check(_again == 0, "and a second run adds nothing")
+    _src = {r["source"] for r in _ac.execute(
+        "SELECT source FROM keywords WHERE term='pdf editor'")}
+    check(_src == {"asa"},
+          "queued terms carry their provenance, so the source can be judged later")
+
+check("GAMES" not in _PG, "games are not a priority genre — we do not build games")
+check("PRODUCTIVITY_UTILITIES" in _PG, "utilities are")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
