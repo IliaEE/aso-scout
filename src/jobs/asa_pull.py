@@ -26,6 +26,7 @@ from collections import Counter
 from datetime import date, timedelta
 
 from .. import db
+from ..db import connect as connect_db
 from ..asa.auth import AsaAuth, Credentials
 from ..asa.popularity import GENRES, PRIORITY_GENRES, PopularityClient, PopularityRow
 
@@ -104,6 +105,22 @@ def weeks_back(n: int) -> list[tuple[str, str]]:
         start = this_sunday - timedelta(days=7 * i)
         out.append((start.isoformat(), (start + timedelta(days=6)).isoformat()))
     return out
+
+
+def store_rows(rows: list[PopularityRow], granularity: str) -> int:
+    """
+    Write one batch in its own short-lived connection.
+
+    Holding a single connection across an hours-long backfill meant competing
+    with the nightly collector for the write lock for the whole run. A
+    connection per batch keeps the contested window to the length of one
+    insert, and lets WAL checkpoint in between.
+    """
+    def _write() -> int:
+        with connect_db() as conn:
+            return store(conn, rows, granularity)
+
+    return db.write_with_retry(_write)
 
 
 def store(conn, rows: list[PopularityRow], granularity: str) -> int:
@@ -220,37 +237,41 @@ def main() -> int:
 
     with db.connect() as conn:
         done = set() if args.force else already_pulled(conn, granularity)
-        todo = [(p, g) for p in periods for g in genres
-                if (p[0], g) not in done]
 
-        log.info("%d genres x %s, %d period(s), depth %d",
-                 len(genres), ",".join(countries), len(periods), args.depth)
-        if done and not args.force:
-            log.info("already stored: %d period/genre pairs — skipping them",
-                     len(done))
-        log.info("to pull: %d pairs, roughly %d requests",
-                 len(todo), len(todo) * max(args.depth // 100, 1))
+    todo = [(p, g) for p in periods for g in genres if (p[0], g) not in done]
 
-        for (start, end), genre in todo:
-            rows = list(client.query(
-                countries, genre, start, end,
-                granularity=granularity,
-                page_size=100, max_rows=args.depth,
-            ))
-            saved = store(conn, rows, granularity)
-            stats["rows"] += saved
-            log.info("  %s %-26s %4d rows", start, genre, saved)
-            if not rows:
-                stats["empty"] += 1
-            # Committed per genre by store(), so an interruption keeps
-            # everything pulled so far.
+    log.info("%d genres x %s, %d period(s), depth %d",
+             len(genres), ",".join(countries), len(periods), args.depth)
+    if done and not args.force:
+        log.info("already stored: %d period/genre pairs — skipping them",
+                 len(done))
+    log.info("to pull: %d pairs, roughly %d requests",
+             len(todo), len(todo) * max(args.depth // 100, 1))
 
-        if args.adopt:
-            added = adopt_terms(conn, args.adopt,
-                                [c.lower() for c in countries])
-            stats["queued"] = added
-            log.info("queued %d new terms with popularity >= %d",
-                     added, args.adopt)
+    for (start, end), genre in todo:
+        rows = list(client.query(
+            countries, genre, start, end,
+            granularity=granularity,
+            page_size=100, max_rows=args.depth,
+        ))
+        # Its own connection, committed immediately: an interruption keeps
+        # everything pulled so far, and nothing is held while the next HTTP
+        # round trip happens.
+        saved = store_rows(rows, granularity)
+        stats["rows"] += saved
+        log.info("  %s %-26s %4d rows", start, genre, saved)
+        if not rows:
+            stats["empty"] += 1
+
+    if args.adopt:
+        def _adopt() -> int:
+            with connect_db() as conn:
+                return adopt_terms(conn, args.adopt,
+                                   [c.lower() for c in countries])
+
+        added = db.write_with_retry(_adopt)
+        stats["queued"] = added
+        log.info("queued %d new terms with popularity >= %d", added, args.adopt)
 
     log.info("http: %s", client.stats)
     print(json.dumps(dict(stats), ensure_ascii=False))

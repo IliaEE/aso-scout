@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -187,6 +188,35 @@ def connect(path: str | None = None) -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+def write_with_retry(fn, *args, attempts: int = 6, **kwargs):
+    """
+    Run a write that may collide with another process, backing off instead of
+    dying.
+
+    SQLite allows one writer. The collector, the judge and a long backfill all
+    write, and `busy_timeout` alone is not enough: a backfill of thousands of
+    rows will eventually land inside someone else's transaction no matter how
+    generous the timeout. Retrying is the difference between losing an hour of
+    pulled data and waiting two seconds.
+    """
+    delay = 1.0
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            last = exc
+            log.warning("database busy (%d/%d), retrying in %.0fs",
+                        attempt + 1, attempts, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+    raise RuntimeError(
+        f"database stayed locked after {attempts} attempts: {last}"
+    )
 
 
 def init_db(path: str | None = None) -> None:

@@ -1096,6 +1096,74 @@ check(_dte.fromisoformat(_mo[-1][1]) < _dte.today().replace(day=1)
 check(_mo[0][0] < _mo[-1][0], "oldest first")
 
 
+print("\n--- a busy database waits instead of dying ---")
+import sqlite3 as _sq9, subprocess as _sp9, sys as _sys9, time as _tm9
+
+_lpath = str(_P6(_tf6.mkdtemp()) / "busy.db")
+_db.init_db(_lpath)
+with _db.connect(_lpath) as _lc:
+    _lc.execute("CREATE TABLE IF NOT EXISTS t (x INTEGER)")
+
+_holder_src = (
+    "import sqlite3,sys,time\n"
+    "c=sqlite3.connect(sys.argv[1],timeout=1.0)\n"
+    "c.execute('BEGIN IMMEDIATE')\n"
+    "c.execute('INSERT INTO t VALUES (1)')\n"
+    "time.sleep(float(sys.argv[2]))\n"
+    "c.commit();c.close()\n"
+)
+_hfile = _P6(_tf6.mkdtemp()) / "holder.py"
+_hfile.write_text(_holder_src)
+
+
+def _impatient_write():
+    _c = _sq9.connect(_lpath, timeout=0.2)
+    try:
+        _c.execute("INSERT INTO t VALUES (2)")
+        _c.commit()
+        return True
+    finally:
+        _c.close()
+
+
+# Another process holds the write lock. A long backfill will land inside
+# someone else's transaction sooner or later, and busy_timeout alone is not
+# enough — losing an hour of pulled rows to a two-second collision is the
+# failure this prevents.
+_proc = _sp9.Popen([_sys9.executable, str(_hfile), _lpath, "2"])
+_tm9.sleep(0.4)
+try:
+    _impatient_write()
+    _died = False
+except _sq9.OperationalError:
+    _died = True
+check(_died, "an impatient write does fail while the lock is held")
+
+_t0 = _tm9.time()
+_ok = _db.write_with_retry(_impatient_write)
+check(_ok is True and _tm9.time() - _t0 > 0.5,
+      f"with retries it waits the lock out instead: {_tm9.time() - _t0:.1f}s")
+_proc.wait()
+
+
+def _broken():
+    _c = _sq9.connect(_lpath)
+    try:
+        _c.execute("INSERT INTO nonexistent VALUES (1)")
+    finally:
+        _c.close()
+
+
+_t0 = _tm9.time()
+try:
+    _db.write_with_retry(_broken)
+    _raised = False
+except _sq9.OperationalError:
+    _raised = True
+check(_raised and _tm9.time() - _t0 < 1.0,
+      "a non-lock error is raised immediately, not retried into silence")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
