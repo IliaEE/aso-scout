@@ -298,9 +298,21 @@ def check_seasonality(
 
 
 def annotate_seasonality(
-    conn: sqlite3.Connection, items: list[Movement],
+    conn: sqlite3.Connection,
+    items: list[Movement],
     granularity: str = "WEEKLY_SUN_SAT",
+    span_days: int = 28,
 ) -> list[Movement]:
+    """
+    Mark each item seasonal / not / unknown.
+
+    Keyword arguments on the call below are deliberate: an earlier version
+    passed granularity positionally into the span_days slot, and every report
+    died on `'int' + 'str'`. The unit tests missed it because they called
+    check_seasonality directly and never went through this wrapper.
+    """
     for m in items:
-        m.seasonal = check_seasonality(conn, m, granularity)
+        m.seasonal = check_seasonality(
+            conn, m, span_days=span_days, granularity=granularity
+        )
     return items

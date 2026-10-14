@@ -62,14 +62,22 @@ def main() -> int:
     ap.add_argument("--term")
     ap.add_argument("--countries", default="US,GB,CA,AU")
     ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--months", action="store_true",
+                    help="use monthly snapshots instead of weekly. Steadier, "
+                         "and with 13 months stored the seasonality check "
+                         "actually has something to compare against — the "
+                         "weekly series has exactly 52 weeks, which is one "
+                         "window short")
     args = ap.parse_args()
+    gran = "MONTHLY" if args.months else "WEEKLY_SUN_SAT"
+    unit = "месяцев" if args.months else "недель"
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s %(message)s")
     db.init_db()
     countries = [c.strip().lower() for c in args.countries.split(",") if c.strip()]
 
     with db.connect() as conn:
-        weeks = periods(conn)
+        weeks = periods(conn, gran)
         if not weeks:
             print("данных нет — запустите asa_pull")
             return 1
@@ -77,9 +85,9 @@ def main() -> int:
         if args.term:
             rows = conn.execute(
                 "SELECT period, country, genre, rank_in_genre, pop_1to100 "
-                "FROM asa_popularity WHERE term = ? AND granularity = 'WEEKLY_SUN_SAT' "
+                "FROM asa_popularity WHERE term = ? AND granularity = ? "
                 "ORDER BY country, genre, period",
-                (args.term.strip().lower(),),
+                (args.term.strip().lower(), gran),
             ).fetchall()
             if not rows:
                 print(f'"{args.term}" нет в данных Apple — значит он вне топ-500')
@@ -93,12 +101,16 @@ def main() -> int:
                       f"поп {r['pop_1to100'] or '·'}")
             return 0
 
-        print(f"данные: {len(weeks)} недель, {weeks[0]} … {weeks[-1]}\n")
+        print(f"данные: {len(weeks)} {unit}, {weeks[0]} … {weeks[-1]}\n")
 
         if args.monthly:
-            items = annotate_seasonality(conn, sustained(conn, countries))
+            items = annotate_seasonality(
+                conn, sustained(conn, countries, granularity=gran),
+                granularity=gran,
+            )
             fresh = [m for m in items if m.seasonal is not True]
-            print(f"РОСЛИ ВЕСЬ МЕСЯЦ — {len(fresh)} шт (и ещё "
+            label = "РОСЛИ НЕСКОЛЬКО МЕСЯЦЕВ" if args.months else "РОСЛИ ВЕСЬ МЕСЯЦ"
+            print(f"{label} — {len(fresh)} шт (и ещё "
                   f"{len(items) - len(fresh)} сезонных)\n")
             print("Месяц роста это не шум. Если такое не было отсмотрено")
             print("раньше — смотреть сейчас.\n")
@@ -111,8 +123,10 @@ def main() -> int:
             return 0
 
         # weekly is the default view
-        entrants = new_entrants(conn, countries)
-        moves = annotate_seasonality(conn, movement(conn, countries))
+        entrants = new_entrants(conn, countries, granularity=gran)
+        moves = annotate_seasonality(
+            conn, movement(conn, countries, granularity=gran), granularity=gran
+        )
         rising = [m for m in moves if m.climbing]
         falling = [m for m in moves if not m.climbing]
 

@@ -1232,6 +1232,18 @@ with _db.connect(_spath) as _sc:
     check(_cs(_sc, _Mv("genuinely new", "us", "BUSINESS", 100, 400, 45, 300)) is False,
           "a first-time climb is not")
 
+    # Through the wrapper, not just the function: passing granularity into the
+    # span_days slot killed every report with "'int' + 'str'", and calling
+    # check_seasonality directly in tests hid it completely.
+    from src.asa.trends import annotate_seasonality as _ann
+    _marked = _ann(_sc, [_Mv("seasonal", "us", "EDUCATION", 100, 400, 55, 300),
+                         _Mv("genuinely new", "us", "BUSINESS", 100, 400, 45, 300)])
+    check([m.seasonal for m in _marked] == [True, False],
+          f"annotate_seasonality works through its real signature: "
+          f"{[m.seasonal for m in _marked]}")
+    check(_ann(_sc, [], "WEEKLY_SUN_SAT") == [],
+          "and still accepts granularity positionally, as the jobs call it")
+
 # With exactly twelve months there is nothing to compare against, and saying
 # so beats a confident wrong answer.
 _short = str(_P6(_tf6.mkdtemp()) / "short.db")
