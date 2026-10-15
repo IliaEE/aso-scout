@@ -1365,6 +1365,51 @@ with _db.connect(_bpath2) as _bc2:
           "and carry no popularity, because a tail was never measured as a term")
 
 
+print("\n--- the idea list separates measured demand from inferred ---")
+from src.jobs.ideas import render as _ideas, popularity_map as _pm
+
+_ipath2 = str(_P6(_tf6.mkdtemp()) / "ideas.db")
+_db.init_db(_ipath2)
+with _db.connect(_ipath2) as _ic2:
+    _es9(_ic2)
+    _st9(_ic2, [_PR("noise meter", "us", "PRODUCTIVITY_UTILITIES",
+                    "2026-10-04", 120, 60, 57, 3)], "WEEKLY_SUN_SAT")
+    check(_pm(_ic2, ["us"]).get(("noise meter", "us")) == 57,
+          "a measured term carries its popularity into the report")
+    check(_pm(_ic2, ["us"]).get(("meal planner", "us")) is None,
+          "an unmeasured one carries none — unknown, not zero")
+
+    _c10 = _Cd(term="noise meter", storefront="us", score=50.0, notes=[],
+               factors={}, apps=noise, suggest_pos=1,
+               features={"top1_name_match": 0.1, "in_metadata_share": 0.6,
+                         "stale_share": 0.5, "top1_relevance": 0.4,
+                         "top1_reviews": 20000, "coherence": 1.0})
+    _c11 = _Cd(term="meal planner", storefront="us", score=48.0, notes=[],
+               factors={}, apps=habit, suggest_pos=2,
+               features={"top1_name_match": 0.1, "in_metadata_share": 0.5,
+                         "stale_share": 0.4, "top1_relevance": 0.5,
+                         "top1_reviews": 15000, "coherence": 0.9})
+    _ic2.execute("INSERT INTO keywords (term, storefront, source, first_seen, "
+                 "last_seen) VALUES ('noise meter','us','asa','x','x')")
+    _ic2.execute("INSERT INTO keywords (term, storefront, source, first_seen, "
+                 "last_seen) VALUES ('meal planner','us','asa','x','x')")
+    _ic2.commit()
+
+    _out10 = _ideas([_c10, _c11], _ic2, ["us"], limit=10)
+    check("1 с измеренным спросом" in _out10,
+          "the header counts how many have a real number")
+    check(_out10.index("noise meter") < _out10.index("meal planner"),
+          "measured demand is ranked above inferred, whatever the score")
+    check("Прочерк значит" in _out10,
+          "and a dash is explained as unmeasured rather than absent")
+    check("Стоимость привлечения здесь НЕ измеряется" in _out10,
+          "the report states plainly that CPT is not in any Apple endpoint")
+
+    _only = _ideas([_c10, _c11], _ic2, ["us"], limit=10, measured_only=True)
+    check("meal planner" not in _only,
+          "--measured drops terms with no popularity number")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
