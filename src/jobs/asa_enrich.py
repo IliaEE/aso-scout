@@ -28,6 +28,7 @@ import sys
 from collections import Counter
 
 from .. import db
+from ..asa.descriptors import tail_of
 from ..asa.trends import movement, new_entrants, sustained
 from ..config import settings
 from ..db import connect as connect_db
@@ -41,9 +42,18 @@ log = logging.getLogger(__name__)
 
 
 def candidates_by_popularity(
-    conn, countries: list[str], min_pop: int, limit: int
+    conn, countries: list[str], min_pop: int, limit: int, max_pop: int = 100
 ) -> list[tuple[str, str, int]]:
-    """Highest measured popularity first, newest period only."""
+    """
+    Terms inside a popularity band, newest period only.
+
+    A band, not a top-N. Sorting by popularity and taking the first 300 gave
+    153 brands out of 300: the 70-90 range is where ChatGPT, Google and Uber
+    Eats live, and nobody is taking those. Generic category demand sits lower,
+    roughly 45-65, which is also the size that fits a $10k target — enough
+    traffic to be worth serving, small enough that the leader is not a
+    fortress.
+    """
     ensure_schema(conn)
     ph = ",".join("?" * len(countries))
     newest = conn.execute(
@@ -56,14 +66,56 @@ def candidates_by_popularity(
         SELECT term, country, MAX(pop_1to100) AS pop
         FROM asa_popularity
         WHERE granularity = 'WEEKLY_SUN_SAT' AND period = ?
-          AND country IN ({ph}) AND pop_1to100 >= ?
+          AND country IN ({ph}) AND pop_1to100 BETWEEN ? AND ?
         GROUP BY term, country
         ORDER BY pop DESC
         LIMIT ?
         """,
-        [newest, *countries, min_pop, limit],
+        [newest, *countries, min_pop, max_pop, limit],
     ).fetchall()
     return [(r["term"], r["country"], r["pop"]) for r in rows]
+
+
+def candidates_from_descriptors(
+    conn, countries: list[str], limit: int
+) -> list[tuple[str, str, int]]:
+    """
+    Needs extracted from the descriptive half of branded terms.
+
+    "be my eyes – helping the blind" is useless as a query and informative as
+    a sentence: the tail names a need, written by the people searching for it.
+    These cost no extra Apple calls to find — the terms are already stored,
+    discarded as brands — and they still face every gate afterwards.
+    """
+    ensure_schema(conn)
+    ph = ",".join("?" * len(countries))
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT term, country FROM asa_popularity
+        WHERE granularity = 'WEEKLY_SUN_SAT' AND country IN ({ph})
+        """,
+        countries,
+    ).fetchall()
+
+    known = {
+        (r["term"], r["storefront"])
+        for r in conn.execute("SELECT term, storefront FROM keywords")
+    }
+
+    out: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        tail = tail_of(r["term"])
+        if not tail:
+            continue
+        key = (tail, r["country"])
+        if key in seen or key in known:
+            continue
+        seen.add(key)
+        out.append((tail, r["country"], 0))   # popularity unknown for a tail
+        if len(out) >= limit:
+            break
+    return out
 
 
 def candidates_trending(
@@ -141,8 +193,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="add competition data to ASA terms")
     ap.add_argument("--top", type=int, default=200)
     ap.add_argument("--min-pop", type=int, default=45)
+    ap.add_argument("--max-pop", type=int, default=65,
+                    help="upper end of the popularity band. Above ~65 is brand "
+                         "territory (chatgpt, google, uber eats), not niches")
     ap.add_argument("--trending", action="store_true",
                     help="enrich the movers rather than the most popular")
+    ap.add_argument("--descriptors", action="store_true",
+                    help="enrich needs extracted from branded terms, e.g. "
+                         "'be my eyes – helping the blind' -> 'helping the blind'")
     ap.add_argument("--countries", default="us,gb,ca,au")
     ap.add_argument("--all", action="store_true",
                     help="re-fetch terms that already have a SERP")
@@ -153,10 +211,14 @@ def main() -> int:
     countries = [c.strip().lower() for c in args.countries.split(",") if c.strip()]
 
     with db.connect() as conn:
-        items = (candidates_trending(conn, countries, args.top)
-                 if args.trending
-                 else candidates_by_popularity(conn, countries,
-                                               args.min_pop, args.top))
+        if args.descriptors:
+            items = candidates_from_descriptors(conn, countries, args.top)
+        elif args.trending:
+            items = candidates_trending(conn, countries, args.top)
+        else:
+            items = candidates_by_popularity(
+                conn, countries, args.min_pop, args.top, args.max_pop
+            )
 
     if not items:
         print("нечего обогащать — сначала asa_pull")

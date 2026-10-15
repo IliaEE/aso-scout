@@ -1311,6 +1311,60 @@ check(_st9res.get("rejected") == 1, "the game term is gated out")
 check(_st9res.get("queued") == 1, "and only the real niche survives")
 
 
+print("\n--- popularity is a band, not a top-N ---")
+from src.jobs.asa_enrich import (candidates_by_popularity as _cbp2,
+                                 candidates_from_descriptors as _cfd)
+from src.asa.descriptors import tail_of as _tail
+
+_bpath2 = str(_P6(_tf6.mkdtemp()) / "band.db")
+_db.init_db(_bpath2)
+with _db.connect(_bpath2) as _bc2:
+    _es9(_bc2)
+    _st9(_bc2, [
+        _PR("chatgpt", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 1, 95, 90, 5),
+        _PR("google", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 3, 92, 88, 5),
+        _PR("pdf editor", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 180, 55, 52, 3),
+        _PR("scan documents", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 210, 52, 48, 3),
+        _PR("tiny thing", "us", "PRODUCTIVITY_UTILITIES", "2026-10-04", 490, 20, 15, 1),
+        _PR("luna: period tracker app", "us", "HEALTH_FITNESS", "2026-10-04", 109, 58, 56, 3),
+    ], "WEEKLY_SUN_SAT")
+
+    # Taking the top 300 from a floor of 50 returned 153 brands out of 300:
+    # popularity 70-90 is where ChatGPT and Google live, and nobody takes
+    # those. Category demand sits lower.
+    _band = [t for t, _, _ in _cbp2(_bc2, ["us"], 45, 20, 65)]
+    check("chatgpt" not in _band and "google" not in _band,
+          f"the band excludes brand-tier popularity: {_band}")
+    check("pdf editor" in _band and "scan documents" in _band,
+          "and keeps category-tier terms")
+    check("tiny thing" not in _band, "while the floor still removes the long tail")
+
+    _topn = [t for t, _, _ in _cbp2(_bc2, ["us"], 50, 20, 100)]
+    check("chatgpt" in _topn,
+          "without an upper bound the giants come back — which is what happened")
+
+print("\n--- needs extracted from branded terms ---")
+for _term, _want in [
+    ("be my eyes – helping the blind", "helping the blind"),
+    ("luna: period tracker app", "period tracker"),
+    ("neateat - meal planner", "meal planner"),
+    ("pretub - video downloader free", "video downloader"),
+]:
+    check(_tail(_term) == _want, f'"{_term}" -> "{_want}"')
+
+for _term in ["chatgpt", "google maps", "mcdonalds app", "trump accounts: official app",
+              "daves hot chicken canada"]:
+    check(_tail(_term) is None,
+          f'"{_term}" yields no usable need')
+
+with _db.connect(_bpath2) as _bc2:
+    _tails = [t for t, _, _ in _cfd(_bc2, ["us"], 20)]
+    check("period tracker" in _tails,
+          f"tails become candidates at no extra API cost: {_tails}")
+    check(all(p == 0 for _, _, p in _cfd(_bc2, ["us"], 20)),
+          "and carry no popularity, because a tail was never measured as a term")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
