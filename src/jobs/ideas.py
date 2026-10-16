@@ -28,6 +28,7 @@ import logging
 import sys
 
 from .. import db
+from ..pipeline.features import brand_signals
 from ..report.decisions import hidden_terms
 from ..report.render import Candidate, group_into_clusters, load_queue
 from .asa_pull import ensure_schema
@@ -75,10 +76,11 @@ def render(
 
     clusters = [
         c for c in group_into_clusters(candidates)
-        if not c.is_brand and not c.is_junk and c.head.term not in hidden
+        if not c.is_junk and c.head.term not in hidden
     ]
 
     rows = []
+    brands = []
     for cl in clusters:
         key = (cl.head.term, cl.head.storefront)
         pop = pops.get(key)
@@ -86,6 +88,17 @@ def render(
         if measured_only and pop is None:
             continue
         if only_source and src != only_source:
+            continue
+
+        # Flagged brands are listed separately rather than dropped. The
+        # detector reaches 23 of 27 on live data, and its two false positives
+        # were "guitar tuner" (fuzzy-matched to GuitarTuna) and "driving
+        # theory" (a subset of a descriptive title) — both real niches.
+        # Hiding those costs an idea; listing them costs a glance.
+        top = (cl.head.apps or [{}])[0]
+        is_brand, why = brand_signals(cl.head.term, top)
+        if is_brand or cl.is_brand:
+            brands.append((cl, pop, why or "название"))
             continue
         rows.append((cl, pop, src))
 
@@ -129,6 +142,22 @@ def render(
     if len(rows) > limit:
         out.append("")
         out.append(f"...ещё {len(rows) - limit}")
+
+    if brands:
+        brands.sort(key=lambda b: -(b[1] or 0))
+        out.append("")
+        out.append(f"ПОХОЖЕ НА БРЕНДЫ — {len(brands)}")
+        out.append("Формулировкой владеет чужое приложение. Детектор ошибается")
+        out.append("в обе стороны, поэтому список показан, а не выброшен:")
+        out.append("пробегите глазами, вдруг там ниша.")
+        out.append("")
+        for cl, pop, why in brands[:12]:
+            p = str(pop) if pop is not None else "·"
+            lead = (cl.head.leader or {}).get("title", "")[:30]
+            out.append(f"      {cl.head.storefront.upper():<4}{cl.head.term[:24]:<26}"
+                       f"{p:>5}  {why:<14}{lead}")
+        if len(brands) > 12:
+            out.append(f"      ...ещё {len(brands) - 12}")
 
     out.append("")
     out.append("поп — шкала Apple 1-100. Прочерк значит, что термин вне топ-500")

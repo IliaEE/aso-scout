@@ -186,3 +186,49 @@ def extract(
         suggest_position=suggest_position,
         in_metadata_share=in_meta / n,
     )
+
+
+BRAND_SUSPECT = 0.75
+
+
+def brand_signals(term: str, app: dict) -> tuple[bool, str]:
+    """
+    Is this query somebody's brand? Returns (verdict, which signal fired).
+
+    name_match alone proved too narrow against live data. It compares the
+    query to the title's head, and a title with no separator has no head —
+    so "square" against "Square Point of Sale (POS)" scored 0.2 and sailed
+    through. A measured-demand list came back with square, xero, manulife,
+    starbucks, procreate, blink, fidelity, toca boca and subway all marked as
+    niches.
+
+    Two signals close that gap:
+
+      seller   the query matches the developer's name. "Xero" publishes
+               "Xero Accounting for business"; nobody else can own that word.
+      prefix   the title begins with the query AND the query is one word.
+               "Blink Home Monitor", "Procreate Pocket", "Compass School
+               Manager" — the first word is the brand and the rest describes
+               it.
+
+    The single-word condition on `prefix` is deliberate. "Driving Theory Test
+    4 in 1" also begins with its query, but "driving theory" is a subject
+    people search for, not a name. Requiring one token keeps that distinction
+    without hand-maintained lists.
+    """
+    title = str(app.get("title") or "")
+    seller = str(app.get("seller") or "")
+
+    if name_match(term, title) >= BRAND_SUSPECT:
+        return True, "название"
+
+    # The developer's own name is the strongest claim of ownership there is.
+    if seller and name_match(term, seller) >= BRAND_SUSPECT:
+        return True, "разработчик"
+
+    flat = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower()).strip()  # noqa: E731
+    q, t = flat(term), flat(title)
+    if q and t and len(q.split()) == 1 and t.split() and t.split()[0] == q:
+        return True, "первое слово"
+
+    return False, ""

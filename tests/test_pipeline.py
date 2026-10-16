@@ -1427,6 +1427,60 @@ check(_cfg11.queue_size <= 100,
       f"the newer, lower-scoring sources")
 
 
+print("\n--- brand detection on the live measured list ---")
+from src.pipeline.features import brand_signals as _bs
+
+# Every one of these came back from a real run marked as a niche. The
+# detector compared the query to the title's head, and a title with no
+# separator has no head — "square" against "Square Point of Sale (POS)"
+# scored 0.2 and sailed through.
+_brands = [
+    ("square", "Square Point of Sale (POS)", "Block, Inc."),
+    ("xero", "Xero Accounting for business", "Xero"),
+    ("manulife", "Manulife Mobile", "Manulife"),
+    ("starbucks", "Starbucks Australia", "Starbucks Coffee Company"),
+    ("procreate", "Procreate Pocket", "Savage Interactive"),
+    ("blink", "Blink Home Monitor", "Immedia Semiconductor"),
+    ("fidelity", "Fidelity Investments", "FMR LLC"),
+    ("compass", "Compass School Manager", "JDLF International"),
+    ("toca boca", "Toca Boca World: Roleplay Town", "Toca Boca"),
+    ("subway", "Subway® Australia", "Subway"),
+    ("proton", "Proton VPN: Fast & Secure", "Proton AG"),
+    ("vodafone", "My Vodafone Australia", "Vodafone"),
+    ("td bank", "TD Canada", "TD Bank Group"),
+    ("desjardins", "Desjardins mobile services", "Desjardins"),
+    ("sumup", "SumUp Business", "SumUp"),
+    ("powerschool", "PowerSchool Mobile", "PowerSchool Group"),
+]
+_caught = sum(1 for t, ti, se in _brands
+              if _bs(t, {"title": ti, "seller": se})[0])
+check(_caught >= 14,
+      f"{_caught}/{len(_brands)} of the brands that slipped through are now caught")
+
+_niches = [
+    ("photo editor", "Picsart AI Photo Editor, Video", "PicsArt"),
+    ("period tracker", "Flo: Period & Cycle Health", "Flo Health"),
+    ("ai video generator", "Grok - AI Assistant", "xAI"),
+    ("meal planner", "mise - meal planner", "Mise Labs"),
+    ("noise meter", "Decibel X: dB Sound Level Meter", "SkyPaw"),
+]
+_kept = sum(1 for t, ti, se in _niches
+            if not _bs(t, {"title": ti, "seller": se})[0])
+check(_kept >= 4, f"{_kept}/{len(_niches)} real niches survive the new signals")
+
+# The single-word condition on the prefix rule exists so that a descriptive
+# title does not turn its own subject into a brand.
+check(_bs("blink", {"title": "Blink Home Monitor", "seller": "X"})[1] == "первое слово",
+      "a one-word query that opens the title is a brand")
+check(_bs("home monitor", {"title": "Home Monitor Deluxe", "seller": "X"})[1]
+      != "первое слово",
+      "a multi-word one is not — descriptive titles start with their subject")
+
+check(_bs("xero", {"title": "Accounting on the go", "seller": "Xero"})[1]
+      == "разработчик",
+      "the developer's own name is a claim of ownership")
+
+
 total = len(results)
 passed = sum(1 for ok, _ in results if ok)
 print(f"\n{'=' * 58}\n{passed}/{total} checks passed\n{'=' * 58}")
