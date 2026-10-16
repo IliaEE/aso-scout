@@ -1396,6 +1396,11 @@ with _db.connect(_ipath2) as _ic2:
     _ic2.commit()
 
     _out10 = _ideas([_c10, _c11], _ic2, ["us"], limit=10)
+    # The search term itself, not a translated label: this is the string you
+    # paste into Keyword Planner, and the Russian name cannot be
+    # cross-referenced with Apple's data at all.
+    check("noise meter" in _out10 and "meal planner" in _out10,
+          "rows carry the actual query")
     check("1 с измеренным спросом" in _out10,
           "the header counts how many have a real number")
     check(_out10.index("noise meter") < _out10.index("meal planner"),
@@ -1408,6 +1413,18 @@ with _db.connect(_ipath2) as _ic2:
     _only = _ideas([_c10, _c11], _ic2, ["us"], limit=10, measured_only=True)
     check("meal planner" not in _only,
           "--measured drops terms with no popularity number")
+
+    _bysrc = _ideas([_c10, _c11], _ic2, ["us"], limit=10, only_source="suggest")
+    check("noise meter" not in _bysrc,
+          "--source filters by origin, so one pipeline can be judged alone")
+
+# The default queue caps at 50 rows by score, and ASA candidates score lower
+# than autocomplete ones — so every single one was invisible in the first
+# live run. The idea list must read deeper than that cap.
+from src.config import settings as _cfg11
+check(_cfg11.queue_size <= 100,
+      f"the default cap is small ({_cfg11.queue_size}) — reading it would hide "
+      f"the newer, lower-scoring sources")
 
 
 total = len(results)

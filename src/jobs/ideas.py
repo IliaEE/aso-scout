@@ -67,6 +67,7 @@ def render(
     countries: list[str],
     limit: int = 40,
     measured_only: bool = False,
+    only_source: str | None = None,
 ) -> str:
     pops = popularity_map(conn, countries)
     sources = source_map(conn)
@@ -83,6 +84,8 @@ def render(
         pop = pops.get(key)
         src = sources.get(key, "")
         if measured_only and pop is None:
+            continue
+        if only_source and src != only_source:
             continue
         rows.append((cl, pop, src))
 
@@ -104,14 +107,19 @@ def render(
         c, r = cl.head, cl.rating
         lead = (c.leader or {}).get("title", "")[:26]
         pop_s = str(pop) if pop is not None else "·"
-        origin = {"asa": "измерен", "autocomplete": "автокомплит",
-                  "llm": "llm"}.get(src, src or "?")
+        origin = {"asa": "ASA", "autocomplete": "автокомплит",
+                  "suggest": "автокомплит", "llm": "llm"}.get(src, src or "?")
         # A term carrying both a measured size and a category description is
         # the one to look at first; say so rather than leaving it implicit.
-        if pop is not None and src == "asa":
-            origin = "измерен"
-        out.append(f"{r.bar:<6}{c.storefront.upper():<4}{cl.display_name[:24]:<26}"
+        if pop is not None:
+            origin = "ASA измер."
+        # The actual search term, not the judge's Russian label: this is the
+        # string you paste into Keyword Planner, and a translated name cannot
+        # be cross-referenced with anything.
+        out.append(f"{r.bar:<6}{c.storefront.upper():<4}{c.term[:24]:<26}"
                    f"{pop_s:>5}  {origin:<12}{lead}")
+        if cl.display_name and cl.display_name.lower() != c.term.lower():
+            out.append(f"      {cl.display_name}")
         notes = [s.key for s in r.signals if not s.met]
         if notes:
             out.append(f"      нет: {', '.join(notes)}")
@@ -138,6 +146,12 @@ def main() -> int:
     ap.add_argument("--measured", action="store_true",
                     help="only terms with a real popularity number")
     ap.add_argument("--countries", default="us,gb,ca,au")
+    ap.add_argument("--source", choices=["asa", "suggest", "llm"],
+                    help="only candidates from one origin")
+    ap.add_argument("--pool", type=int, default=5000,
+                    help="how deep into the queue to look. The default report "
+                         "caps at 50 by score, which hid every ASA candidate "
+                         "because they score lower than autocomplete terms")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s %(message)s")
@@ -145,11 +159,15 @@ def main() -> int:
     countries = [c.strip().lower() for c in args.countries.split(",") if c.strip()]
 
     with db.connect() as conn:
-        cands = load_queue(conn)
+        # Load the whole queue, not the scored top 50. Score was tuned on
+        # autocomplete terms, so ranking by it buries everything that came
+        # from Apple's measured data — which is the opposite of useful.
+        cands = load_queue(conn, limit=args.pool)
         if not cands:
             print("очередь пуста — запустите asa_enrich")
             return 1
-        print(render(cands, conn, countries, args.limit, args.measured))
+        print(render(cands, conn, countries, args.limit, args.measured,
+                     only_source=args.source))
     return 0
 
 
