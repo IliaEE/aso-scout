@@ -31,6 +31,7 @@ class ClusterCandidate:
     """
     head: "Candidate"
     variants: list["Candidate"] = field(default_factory=list)
+    _extra_markets: list[str] = field(default_factory=list)
 
     @property
     def score(self) -> float:
@@ -113,14 +114,21 @@ class ClusterCandidate:
 
     @property
     def rating(self):
-        f = self.head.features
+        f = dict(self.head.features)
+        # suggest_pos lives on the keyword row, not in the stored features,
+        # but the demand signal is the most important of the five.
+        f.setdefault("suggest_pos", self.head.suggest_pos)
         return rate(
             score=self.head.score,
             cluster_size=self.size,
             name_match=float(f.get("top1_name_match") or 0.0),
-            stale_share=float(f.get("stale_share") or 0.0),
-            top1_relevance=float(f.get("top1_relevance") or 1.0),
+            features=f,
         )
+
+    @property
+    def markets(self) -> list[str]:
+        """Storefronts this niche was found in, including merged ones."""
+        return sorted({self.head.storefront.upper()} | set(self._extra_markets))
 
 
 @dataclass
@@ -217,10 +225,29 @@ def group_into_clusters(candidates: list[Candidate]) -> list[ClusterCandidate]:
     would merge them into one entry and destroy exactly the signal we want:
     the same niche surfacing in several markets independently.
     """
-    out: list[ClusterCandidate] = []
-    stores = sorted({c.storefront for c in candidates})
-    for store in stores:
-        out.extend(_group_one_store([c for c in candidates if c.storefront == store]))
+    per_store: list[ClusterCandidate] = []
+    for store in sorted({c.storefront for c in candidates}):
+        per_store.extend(
+            _group_one_store([c for c in candidates if c.storefront == store])
+        )
+
+    # One niche, one row. Clustering runs per storefront so a market is never
+    # silently absorbed, but reporting four near-identical rows for US, GB, CA
+    # and AU is how "live 360" appeared six times in a week. Merge them here
+    # and keep the market list as the evidence it is: a niche confirmed
+    # independently in several stores is a stronger signal, not four signals.
+    merged: dict[str, ClusterCandidate] = {}
+    for cl in sorted(per_store, key=lambda c: -c.score):
+        key = cl.head.term
+        if key in merged:
+            merged[key]._extra_markets.append(cl.head.storefront.upper())
+            # Keep the widest cluster's variants.
+            if cl.size > merged[key].size:
+                merged[key].variants = cl.variants
+        else:
+            merged[key] = cl
+
+    out = list(merged.values())
     out.sort(key=lambda c: -c.score)
     return out
 
@@ -428,137 +455,136 @@ def render_clusters_table(
     limit: int | None = None,
 ) -> str:
     """
-    Every niche as one table row, with the columns a decision actually needs.
+    Every niche as one evidence-bearing row.
 
-    The storefront column is not decoration. Without it the same term from US,
-    GB and CA reads as three duplicate rows with three different scores, which
-    is exactly how the earlier list looked.
+    Brands and broad terms are counted, not listed. They were taking space in
+    a message meant for decisions, and a brand query is not actionable: the
+    phrasing belongs to someone else's app.
 
-    Trend arrows come from stored history and are blank until there is enough
-    of it. `conn` is optional so the table can be rendered without a database.
+    The columns exist so a row can be read without trusting the stars. What
+    each one actually is, stated plainly because the distinction matters:
+
+      авто  — the term's rank in Apple's autocomplete. Apple orders those by
+              how often people type them, so this is the only real demand
+              signal available without a paid tool. It is ordinal: #1 beats
+              #5, but neither is a volume.
+      мета  — how many of the top-10 put the term in their own title. These
+              are competitors who already did the keyword research and spent
+              scarce metadata characters on it.
+      отз   — the leader's review count, a market-size proxy. Biased upward
+              for apps that nag for ratings.
+      стар  — how many of the top-10 have not shipped in over a year.
+      тр    — trend, blank until there is history to compute one.
+
+    None of these is search volume. That number comes from Astro, and the
+    report says so rather than implying otherwise.
     """
     clusters = group_into_clusters(candidates)
+
+    # Anything already reviewed leaves the list. Without this the queue is
+    # cumulative forever and every digest reads the same.
+    hidden: dict[str, str] = {}
+    if conn is not None:
+        try:
+            from .decisions import hidden_terms  # noqa: PLC0415
+            hidden = hidden_terms(conn)
+        except Exception:
+            hidden = {}
+    reviewed = [c for c in clusters if c.head.term in hidden]
+    clusters = [c for c in clusters if c.head.term not in hidden]
+
     niches = [c for c in clusters if not c.is_brand and not c.is_junk]
     brands = [c for c in clusters if c.is_brand]
     junk = [c for c in clusters if c.is_junk and not c.is_brand]
-    niches.sort(key=lambda c: (-c.rating.stars, -c.score))
-    brands.sort(key=lambda c: -c.score)
 
     markets: dict[str, list[str]] = {}
     for cl in clusters:
         markets.setdefault(cl.head.term, []).append(cl.head.storefront.upper())
 
     days = tr.history_days(conn) if conn is not None else 0
-    stores = sorted({c.storefront.upper() for c in candidates})
     since = last_digest_at(conn) if conn is not None else None
     fresh = [c for c in niches if c.is_new(since)]
+    stores = sorted({c.storefront.upper() for c in candidates})
+
+    niches.sort(key=lambda c: (not c.is_new(since), -c.rating.stars, -c.score))
 
     out: list[str] = []
-    out.append(f"НИШИ · {', '.join(stores)} · {len(niches)} из {len(candidates)} запросов")
-    if since:
-        out.append(f"новых с прошлого дайджеста: {len(fresh)}")
+    out.append(f"ИДЕИ · {', '.join(stores)} · {len(niches)} ниш")
+    filtered = len(brands) + len(junk)
+    if filtered:
+        out.append(f"отсеяно: {len(brands)} брендовых, {len(junk)} широких")
+    if reviewed:
+        out.append(f"уже просмотрено вами: {len(reviewed)}")
+    if since and fresh:
+        out.append(f"новых с прошлого раза: {len(fresh)}")
     if days < 14:
-        out.append(f"история {days} дн. — тренды появятся примерно через 2 недели")
+        out.append(f"история {days} дн. — тренды появятся через ~2 недели")
     out.append("")
-    out.append(
-        f"{'оценка':<7} {'мкт':<4}{'ниша':<26}{'кл':>3} {'тр':<3}"
-        f"{'лидер':<26}{'рейт':>5}{'отз':>7} {'стар':>5}"
-    )
-    out.append("─" * 96)
-
-    # New entries first, then by rating. Otherwise a fresh find sits at row
-    # 28 behind the same familiar names every single day.
-    niches.sort(key=lambda c: (not c.is_new(since), -c.rating.stars, -c.score))
+    out.append(f"{'оцен':<6}{'мкт':<4}{'ниша':<22}{'кл':>3}{'авто':>6}"
+               f"{'мета':>6}{'отз':>6}{'стар':>6}{'тр':>3}")
+    out.append("─" * 62)
 
     rows = niches[:limit] if limit else niches
     for cl in rows:
         c, r = cl.head, cl.rating
         lead = c.leader or {}
-        feats = c.features
+        f = c.features
+
         reviews = lead.get("rating_count") or 0
         rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
-        stale = feats.get("stale_share")
-        stale_s = f"{int(stale * 10)}/10" if stale is not None else "·"
+        pos = c.suggest_pos
+        auto = f"#{pos}" if pos else "·"
+        meta = f.get("in_metadata_share")
+        meta_s = f"{int(round(meta * 10))}/10" if meta is not None else "·"
+        stale = f.get("stale_share")
+        stale_s = f"{int(round(stale * 10))}/10" if stale is not None else "·"
 
         arrow = tr.NONE
         detail = None
         if conn is not None:
-            kid = tr.keyword_id_for(conn, c.term, c.storefront)
             t_demand = tr.demand_trend(conn, c.term, c.storefront)
-            t_traffic = (
-                tr.traffic_trend(conn, lead["track_id"], c.storefront)
-                if lead.get("track_id") else tr.NO_TREND
-            )
-            # Demand first: autocomplete position is closer to what a person
-            # means by "is this getting more popular" than review velocity is.
+            t_traffic = (tr.traffic_trend(conn, lead["track_id"], c.storefront)
+                         if lead.get("track_id") else tr.NO_TREND)
             chosen = t_demand if t_demand.known else t_traffic
-            arrow = chosen.arrow
-            detail = chosen.detail
-            if kid:
-                st = tr.score_trend(conn, kid)
-                if st.known and st.arrow != tr.FLAT:
-                    detail = f"{detail + ' · ' if detail else ''}{st.detail}"
+            arrow, detail = chosen.arrow, chosen.detail
 
         out.append(
-            f"{r.bar:<7} {c.storefront.upper():<4}{c.term[:24]:<26}{cl.size:>3} "
-            f"{arrow:<3}{(lead.get('title') or '?')[:24]:<26}"
-            f"{lead.get('rating') or 0:>4.1f}★{rev:>7} {stale_s:>5}"
+            f"{r.bar:<6}{c.storefront.upper():<4}{cl.display_name[:20]:<22}"
+            f"{cl.size:>3}{auto:>6}{meta_s:>6}{rev:>6}{stale_s:>6}{arrow:>3}"
         )
 
-        v = c.verdict
-        meta = list(r.flags)
-        if v is not None:
-            # "unclear" is the honest answer most of the time — the API
-            # exposes no in-app purchase data — but printing it on every row
-            # is noise. Show monetization only when the model committed.
-            mon = {"subscription": "подписка", "one_time": "разовая покупка",
-                   "ads": "реклама"}.get(getattr(v, "monetization", ""), "")
-            if mon:
-                meta.append(mon)
-            if getattr(v, "intent", "") == "informational":
-                meta.append("информационный запрос")
-            if getattr(v, "note", ""):
-                meta.append(str(v.note)[:90])
+        notes: list[str] = []
         if cl.is_new(since):
-            meta.insert(0, "НОВОЕ")
-        if cl.is_broad:
-            meta.append("широкий запрос")
-        also = [m for m in markets.get(c.term, []) if m != c.storefront.upper()]
-        if also:
-            meta.append(f"также в {', '.join(also)}")
+            notes.append("НОВОЕ")
+        if c.term != cl.display_name:
+            notes.append(f'"{c.term}"')
+        other = [m for m in cl.markets if m != c.storefront.upper()]
+        if other:
+            notes.append(f"также {', '.join(other)}")
+        if f.get("top1_relevance") is not None and f["top1_relevance"] < 0.5:
+            notes.append("точного лидера нет")
         if detail:
-            meta.append(detail)
-        if meta:
-            out.append(f"{'':12}{' · '.join(meta)}")
+            notes.append(detail)
+        missing = [sig.key for sig in r.signals if not sig.met]
+        if missing:
+            notes.append(f"нет: {', '.join(missing)}")
+        if notes:
+            out.append(f"      {' · '.join(notes)}")
         if cl.variants:
             more = f" +{len(cl.variants) - 3}" if len(cl.variants) > 3 else ""
-            out.append(f"{'':12}+ {', '.join(v.term for v in cl.variants[:3])}{more}")
+            out.append(f"      + {', '.join(v.term for v in cl.variants[:3])}{more}")
 
-    if junk:
+    if limit and len(niches) > len(rows):
         out.append("")
-        out.append(f"ОТСЕЯНО СУДЬЁЙ: {len(junk)} "
-                   f"(широкие или бессмысленные запросы) — "
-                   + ", ".join(c.head.term for c in junk[:10]))
-
-    if brands:
-        out.append("")
-        out.append("ЛИДЫ ИЗ БРЕНДОВЫХ ЗАПРОСОВ — спрос доказан, формулировку держит чужое приложение")
-        out.append("─" * 96)
-        for cl in brands[: (limit or 12)]:
-            c = cl.head
-            lead = c.leader or {}
-            reviews = lead.get("rating_count") or 0
-            rev = f"{reviews // 1000}k" if reviews >= 1000 else str(reviews)
-            out.append(
-                f"{'':7} {c.storefront.upper():<4}{c.term[:24]:<26}{'':>3} "
-                f"{'':<3}{(lead.get('title') or '?')[:24]:<26}"
-                f"{lead.get('rating') or 0:>4.1f}★{rev:>7}"
-            )
+        out.append(f"...ещё {len(niches) - len(rows)} — смотрите /clusters")
 
     out.append("")
-    out.append("кл = запросов в кластере · тр = тренд (↑ спрос растёт, ↓ падает,")
-    out.append("→ стабильно, · нет истории) · стар = сколько из топ-10 не")
-    out.append("обновлялись больше года")
+    out.append("авто — позиция в автокомплите Apple (сортирует по частоте")
+    out.append("       запросов; это порядок, а не объём)")
+    out.append("мета — у скольких из топ-10 слово стоит в названии")
+    out.append("отз  — отзывов у лидера · стар — не обновлялись >1 года")
+    out.append("кл   — запросов в кластере · тр — тренд")
     out.append("")
-    out.append(LEGEND)
+    out.append("Объём поиска здесь НЕ измеряется — его даёт только Astro.")
+    out.append("Звёзды ранжируют внимание, а не предсказывают успех.")
     return "\n".join(out)

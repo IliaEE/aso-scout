@@ -90,6 +90,39 @@ async def main() -> int:
             print("  valid. Move to a different host before collecting anything.")
             problems += 1
 
+    # --- module inventory ------------------------------------------------
+    # Partial deploys have broken this project three times: a job imported a
+    # module that had never been uploaded, and the failure surfaced as a
+    # traceback at the worst moment. Checking the inventory up front turns
+    # that into one readable line.
+    import importlib  # noqa: PLC0415
+
+    print("\nмодули")
+    expected = [
+        "src.db", "src.config", "src.server",
+        "src.pipeline.features", "src.pipeline.score", "src.pipeline.cluster",
+        "src.report.render", "src.report.rating", "src.report.decisions",
+        "src.report.trends",
+        "src.sources.http", "src.sources.suggest", "src.sources.itunes",
+        "src.llm.provider", "src.llm.judge", "src.llm.ideate",
+        "src.asa.auth", "src.asa.popularity", "src.asa.trends",
+        "src.asa.descriptors",
+    ]
+    missing = []
+    for name in expected:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:
+            missing.append(f"{name}: {type(exc).__name__}")
+    if missing:
+        print(f"  [{BAD}] не хватает {len(missing)} из {len(expected)}:")
+        for m in missing[:8]:
+            print(f"         {m}")
+        print("         деплой неполный — залейте весь исходник целиком")
+        problems += 1
+    else:
+        print(f"  [{OK}] все {len(expected)} модулей на месте")
+
     # --- LLM layer -------------------------------------------------------
     # A diagnostic tool must never be the thing that crashes. A partial deploy
     # once left chat_for missing here and doctor answered with a traceback

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import statistics
+
+from rapidfuzz import fuzz
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -100,9 +102,16 @@ def name_match(term: str, title: str) -> float:
     # zero, so compare the space-free forms too and take the stronger signal.
     if "".join(sorted(q)) and "".join(q) == "".join(h):
         return 1.0
-    flat_q = "".join(re.sub(r"[^a-z0-9]", "", term.lower()))
-    flat_h = "".join(re.sub(r"[^a-z0-9]", "", head.lower()))
+    flat_q = re.sub(r"[^a-z0-9]", "", term.lower())
+    flat_h = re.sub(r"[^a-z0-9]", "", head.lower())
     if flat_q and flat_q == flat_h:
+        return 1.0
+
+    # Near-misses are the common case and token comparison scores them zero:
+    # "live 360" is Life360, "saver" is Savers, "dual mobile app" is Duo
+    # Mobile. Measured on real misses, brands land at 73-100 while genuine
+    # niches top out at 58, so 70 separates them with room to spare.
+    if flat_q and flat_h and fuzz.ratio(flat_q, flat_h) >= 70:
         return 1.0
 
     return len(q & h) / max(len(q | h), 1)

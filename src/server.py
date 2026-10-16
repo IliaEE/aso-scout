@@ -104,6 +104,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._text(self._report())
             elif path == "/clusters":
                 self._text(self._clusters())
+            elif path.startswith("/skip/") or path.startswith("/astro/") \
+                    or path.startswith("/later/"):
+                self._text(self._decide(path))
+            elif path == "/reviewed":
+                self._text(self._reviewed())
+            elif path == "/unskip":
+                self._text(self._unskip())
             elif path == "/digest":
                 self._text(self._send_digest())
             elif path == "/export.csv":
@@ -120,7 +127,12 @@ class Handler(BaseHTTPRequestHandler):
                     "/prompt/N    промпт кластера N\n"
                     "/digest      отправить дайджест в Telegram сейчас\n"
                     "/export.csv  очередь файлом\n"
-                    "/export.db   копия базы целиком\n",
+                    "/export.db   копия базы целиком\n"
+                    "/skip/<запрос>   убрать из списка навсегда\n"
+                    "/later/<запрос>  отложить на 14 дней\n"
+                    "/astro/<запрос>  помечено как ушедшее в Astro\n"
+                    "/reviewed    что уже просмотрено\n"
+                    "/unskip      снять все решения\n",
                     404,
                 )
         except Exception as exc:  # keep the server alive on a bad page
@@ -180,6 +192,61 @@ class Handler(BaseHTTPRequestHandler):
     def _clusters(self) -> str:
         with db.connect() as conn:
             return render_clusters_table(load_queue(conn), conn)
+
+    def _decide(self, path: str) -> str:
+        """
+        /skip/<term>, /astro/<term>, /later/<term>
+
+        Keyed by term, not by row number: a list position shifts between
+        viewing and tapping, and silencing the wrong niche is worse than an
+        ugly URL. Not keyed by storefront either — a brand is a brand in all
+        four English stores, and dismissing it four times is how the habit
+        dies.
+        """
+        from urllib.parse import unquote_plus  # noqa: PLC0415
+
+        from .report.decisions import record  # noqa: PLC0415
+
+        parts = path.strip("/").split("/", 1)
+        if len(parts) != 2 or not parts[1]:
+            return "usage: /skip/<запрос>\n"
+        verdict = {"skip": "skip", "astro": "astro", "later": "later"}[parts[0]]
+        term = unquote_plus(parts[1]).strip().lower()
+
+        with db.connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM keywords WHERE term = ? LIMIT 1", (term,)
+            ).fetchone()
+            if not exists:
+                return f'запрос "{term}" не найден в очереди\n'
+            record(conn, term, "all", verdict)
+
+        done = {"skip": "больше не покажем",
+                "astro": "помечено как ушедшее в Astro",
+                "later": "вернём через 14 дней"}[verdict]
+        return f'"{term}" — {done}\n\nвернуть: /unskip\n'
+
+    def _reviewed(self) -> str:
+        from .report.decisions import hidden_terms, summary  # noqa: PLC0415
+
+        with db.connect() as conn:
+            hidden = hidden_terms(conn)
+            counts = summary(conn)
+        if not hidden:
+            return "ничего ещё не просмотрено\n"
+        lines = [f"просмотрено: {counts}", ""]
+        for term, verdict in sorted(hidden.items()):
+            lines.append(f"  {verdict:<6} {term}")
+        lines.append("")
+        lines.append("сбросить всё: /unskip")
+        return "\n".join(lines)
+
+    def _unskip(self) -> str:
+        from .report.decisions import clear  # noqa: PLC0415
+
+        with db.connect() as conn:
+            n = clear(conn)
+        return f"снято решений: {n}\n"
 
     def _send_digest(self) -> str:
         from .jobs.digest import build  # noqa: PLC0415

@@ -164,8 +164,15 @@ class Thresholds:
     # weak. Reviews we can actually measure.
     min_top1_reviews: int = 300
 
-    # Review count at which a niche counts as fully proven, for scoring.
-    proven_top1_reviews: int = 50_000
+    # Review count where a niche is best: enough traffic to be proven, not
+    # so much that the leader is unassailable.
+    peak_top1_reviews: int = 30_000
+
+    # Past this the leader is a fortress, not a market. A live run put
+    # Life360 (3.0M reviews), Duo Mobile (2.3M) and myQ (2.4M) forward as
+    # four-star candidates because the old curve saturated at 50k and never
+    # came back down — more reviews were always "better".
+    fortress_top1_reviews: int = 1_000_000
 
     # --- Gate: coherence -------------------------------------------------
     # Share of top-10 apps whose title+subtitle contain the query's tokens.

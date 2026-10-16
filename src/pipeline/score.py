@@ -36,6 +36,7 @@ class Gate(str, Enum):
     EMPTY_SERP = "empty_serp"
     GAME_DOMINATED = "game_dominated"
     GIANT_DOMINATED = "giant_dominated"
+    FORTRESS = "fortress"
 
 
 class Verdict(str, Enum):
@@ -93,6 +94,11 @@ def check_gates(f: Features) -> list[Gate]:
     if is_giant(f.top1_seller):
         failed.append(Gate.GIANT_DOMINATED)
 
+    # An app with a million-plus reviews owns its keyword through years of
+    # install history. No amount of metadata work displaces it.
+    if f.top1_reviews >= t.fortress_top1_reviews:
+        failed.append(Gate.FORTRESS)
+
     if (
         f.top3_rating_median is not None
         and f.top3_rating_median >= t.unbeatable_rating
@@ -120,9 +126,10 @@ def _market(f: Features) -> float:
     """
     How much traffic the niche demonstrably carries, 0..1.
 
-    Log-scaled review count of the leader, mapped from the traction floor to
-    the "fully proven" ceiling. This replaced a monetization factor that was
-    computed from data the iTunes API never provides.
+An inverted U on the log of the leader's review count. Too few reviews
+    means nobody wants the niche; too many means the leader cannot be moved.
+    The first version only modelled the floor, so a 3M-review incumbent scored
+    exactly as well as a healthy 30k one.
 
     It is a market-size proxy, not a revenue estimate, and it inherits the
     same bias as every review-based number here: apps that nag for ratings
@@ -131,10 +138,19 @@ def _market(f: Features) -> float:
     t = settings.thresholds
     if f.top1_reviews <= 0:
         return 0.0
+
     lo = math.log10(max(t.min_top1_reviews, 1))
-    hi = math.log10(max(t.proven_top1_reviews, t.min_top1_reviews + 1))
-    val = (math.log10(f.top1_reviews) - lo) / (hi - lo)
-    return max(0.0, min(val, 1.0))
+    peak = math.log10(max(t.peak_top1_reviews, t.min_top1_reviews + 1))
+    hi = math.log10(max(t.fortress_top1_reviews, t.peak_top1_reviews + 1))
+    v = math.log10(f.top1_reviews)
+
+    if v <= lo:
+        return 0.0
+    if v <= peak:
+        # Rising: traffic is being proven.
+        return (v - lo) / (peak - lo)
+    # Falling: still a real market, but increasingly someone else's.
+    return max(0.0, (hi - v) / (hi - peak))
 
 
 def _demand_proxy(f: Features) -> float:

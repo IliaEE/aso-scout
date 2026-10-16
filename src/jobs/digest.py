@@ -80,11 +80,15 @@ def main() -> int:
                 "CREATE TABLE IF NOT EXISTS run_state "
                 "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
-            conn.execute(
-                "INSERT INTO run_state (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            for _k, _v in (
                 (STATE_LAST_DIGEST, today),
-            )
+                ("last_digest_at", datetime.now(timezone.utc).isoformat()),
+            ):
+                conn.execute(
+                    "INSERT INTO run_state (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_k, _v),
+                )
         print(f"отправлено ({size} запросов в очереди)")
         return 0
 
